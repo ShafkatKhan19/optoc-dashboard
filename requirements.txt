@@ -1,0 +1,18 @@
+streamlit>=1.32
+pandas>=2.0
+numpy>=1.24
+plotly>=5.20
+
+# IMPORTANT: pinned to match the scikit-learn version the supplied .pkl
+# models were trained/pickled with (1.5.1). A newer scikit-learn
+# (tested: 1.8.0) breaks unpickling internals (SimpleImputer/
+# ColumnTransformer state) and predict_proba will raise
+# AttributeError: 'SimpleImputer' object has no attribute '_fill_dtype'.
+# Do not upgrade this without re-testing against the .pkl files, or
+# ask Buchi/the professor for models re-exported with a newer sklearn.
+scikit-learn==1.5.1
+
+xgboost>=2.0
+shap>=0.44
+lime>=0.2
+joblib>=1.3

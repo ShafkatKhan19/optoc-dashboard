@@ -1,0 +1,6 @@
+Outcome,Outcome_Column,Best_Model,PKL_Filename,SHAP_Matrix_Filename,Youden_Threshold
+AKI,aki_flag,XGBoost,aki_xgb_model.pkl,shap_data/shap_values_aki_xgboost.csv,0.3991984724998474
+Sepsis,sepsis_flag,Random Forest,sepsis_rf_model.pkl,shap_data/shap_values_sepsis_random_forest.csv,0.25
+In-Hospital Mortality,mortality_flag,Random Forest,mortality_rf_model.pkl,shap_data/shap_values_in_hospital_mortality_random_forest.csv,0.21
+30-Day Readmission,readmission_30d_flag,XGBoost,readmission_xgb_model.pkl,shap_data/shap_values_30_day_readmission_xgboost.csv,0.1537480503320694
+ICU-to-Floor Deterioration,icu_floor_deterioration_flag,XGBoost,icu_detox_xgb_model.pkl,shap_data/shap_values_icu_to_floor_deterioration_xgboost.csv,0.03496096283197403
