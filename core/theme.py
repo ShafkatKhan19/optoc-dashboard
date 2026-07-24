@@ -63,13 +63,13 @@ def risk_tier(prob, threshold):
     return "LOW"
 
 
-def risk_badge_html(tier, label=None):
+def risk_badge_html(tier, label=None, font_size="12px", padding="3px 10px"):
     c = RISK_COLORS.get(tier, RISK_COLORS["LOW"])
     label = label or tier
     return (
         f'<span style="background-color:{c["bg"]}; color:{c["text"]}; '
-        f'padding:3px 10px; border-radius:999px; font-weight:700; '
-        f'font-size:12px; letter-spacing:0.02em;">{label}</span>'
+        f'padding:{padding}; border-radius:999px; font-weight:700; '
+        f'font-size:{font_size}; letter-spacing:0.02em;">{label}</span>'
     )
 
 
@@ -100,6 +100,22 @@ def inject_global_css():
             border-radius: 12px;
             padding: 14px 16px;
             box-shadow: 0 2px 5px rgba(15, 23, 42, 0.12);
+        }}
+        /* Let metric labels/values wrap and shrink instead of being
+           clipped with an ellipsis -- affects every st.metric card in
+           the app (Homepage KPIs, Vitals & Labs, Domain summary cards)
+           since they all use the same Streamlit component. */
+        div[data-testid="stMetricLabel"] {{
+            white-space: normal !important;
+            overflow: visible !important;
+            font-size: 13px !important;
+            line-height: 1.25 !important;
+        }}
+        div[data-testid="stMetricValue"] {{
+            white-space: normal !important;
+            overflow: visible !important;
+            font-size: 22px !important;
+            line-height: 1.25 !important;
         }}
         div[data-testid="stElementContainer"] div[data-testid="stVerticalBlockBorderWrapper"],
         div[data-testid="stDataFrame"] {{
@@ -161,6 +177,22 @@ def inject_global_css():
         button[kind="primary"]:hover {{
             background-color: #D97706 !important;
             border-color: #D97706 !important;
+        }}
+        /* Print Summary: scope window.print() to just .optoc-print-section
+           instead of printing the whole app (sidebar, nav, every chart). */
+        @media print {{
+            body * {{
+                visibility: hidden;
+            }}
+            .optoc-print-section, .optoc-print-section * {{
+                visibility: visible;
+            }}
+            .optoc-print-section {{
+                position: absolute;
+                top: 0;
+                left: 0;
+                width: 100%;
+            }}
         }}
         .optoc-header h1 {{
             margin: 0;

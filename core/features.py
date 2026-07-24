@@ -25,7 +25,7 @@ placeholder, per the spec's "system uses training-set median" note.
 import numpy as np
 import pandas as pd
 
-from core.model_registry import REQUIRED_FEATURE_COLUMNS, get_background_medians
+from core.model_registry import REQUIRED_FEATURE_COLUMNS
 
 CHARLSON_WEIGHTS = {
     "MI": 1, "CHF": 1, "PVD": 1, "stroke": 1, "dementia": 1, "COPD": 1,
@@ -171,9 +171,17 @@ def build_features_df(patients_df, timeseries_df=None):
             ts_p = timeseries_df[timeseries_df["patient_id"] == pid]
         rows.append(build_features_row(row.to_dict(), ts_p))
 
-    feat_df = pd.DataFrame(rows)[REQUIRED_FEATURE_COLUMNS]
-
-    medians = get_background_medians()
-    feat_df = feat_df.astype(float).fillna(medians)
+    # Leave missing values as NaN -- do NOT pre-impute here. Each model's
+    # own sklearn Pipeline ("prep" step) already contains an imputer fit
+    # on that model's real training data, and expects to do this itself
+    # (this matches the professor's validate_dashboard.py reference
+    # implementation, which passes raw/NaN features straight into
+    # model.predict_proba() with no external imputation step). Pre-filling
+    # with our own medians -- previously computed from just the AKI
+    # model's LIME background, and reused for all four different models --
+    # silently overrode each model's real trained imputation statistics
+    # and was the source of the risk-score discrepancies flagged against
+    # validate_dashboard.py.
+    feat_df = pd.DataFrame(rows)[REQUIRED_FEATURE_COLUMNS].astype(float)
 
     return feat_df, patients_df["patient_id"].tolist()

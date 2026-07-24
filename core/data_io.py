@@ -44,10 +44,16 @@ def build_enriched_cohort():
         threshold = registry[outcome]["threshold"]
         enriched[f"{outcome}_tier"] = [risk_tier(p, threshold) for p in probs]
 
-    # Composite score: mean of the 4 outcome probabilities (0-100 scale)
+    # Composite score: weighted blend of the 4 outcome probabilities
+    # (0-100 scale), matching validate_dashboard.py's COMPOSITE_WEIGHTS
+    # exactly. This was previously an unweighted mean (25% each) -- a
+    # real discrepancy from the reference implementation, not just a
+    # display/label issue, corrected here.
     enriched["composite_score"] = (
-        enriched[["aki_risk", "sepsis_risk", "mortality_risk", "readmission_risk"]].mean(axis=1) * 100
-    ).round(1)
+        0.35 * enriched["mortality_risk"] + 0.30 * enriched["sepsis_risk"]
+        + 0.25 * enriched["aki_risk"] + 0.10 * enriched["readmission_risk"]
+    ) * 100
+    enriched["composite_score"] = enriched["composite_score"].round(1)
     enriched["composite_tier"] = enriched["composite_score"].apply(
         lambda s: "HIGH" if s >= 70 else ("MEDIUM" if s >= 42 else "LOW")
     )

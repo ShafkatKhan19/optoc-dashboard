@@ -14,10 +14,14 @@ scope/time; the CSV upload path supports the full raw schema already
 option today.
 """
 
+import os
+
 import streamlit as st
 import pandas as pd
 
 from core.theme import page_header, risk_cell_style, RISK_COLORS
+
+SAMPLE_DATA_PATH = os.path.join(os.path.dirname(__file__), "..", "data", "optoc_sample_patients.csv")
 from core.features import build_features_df
 from core.model_registry import predict_all, load_registry
 from core.theme import risk_tier
@@ -30,6 +34,62 @@ RAW_REQUIRED_COLUMNS = [
     "wbc_first", "magnesium_first", "phosphate_first", "troponin_t_peak",
     "fibrinogen_first", "haemoglobin_latest", "glucose_current",
 ]
+
+# Full raw schema (matches data/optoc_sample_patients.csv exactly) -- used
+# to build the downloadable CSV template. RAW_REQUIRED_COLUMNS above is
+# the subset the models strictly need; the rest (comorbidities, active
+# medication flags, admission dates) are optional but improve accuracy.
+FULL_TEMPLATE_COLUMNS = [
+    "patient_id", "sex", "icu_unit", "admission_date", "discharge_due_date", "age",
+    "icu_los_days", "prior_admissions_1yr", "heart_rate", "systolic_bp", "diastolic_bp",
+    "respiratory_rate", "spo2", "fio2", "gcs_total", "rass_min", "urine_output_24h",
+    "fluid_balance_24h", "map_min", "sofa_total", "creatinine_baseline", "creatinine_current",
+    "lactate_peak", "wbc_first", "magnesium_first", "phosphate_first", "troponin_t_peak",
+    "fibrinogen_first", "haemoglobin_latest", "glucose_current",
+    "comorbidity_MI", "comorbidity_CHF", "comorbidity_PVD", "comorbidity_stroke",
+    "comorbidity_dementia", "comorbidity_COPD", "comorbidity_diabetes_uncomplicated",
+    "comorbidity_diabetes_complicated", "comorbidity_CKD", "comorbidity_paraplegia",
+    "comorbidity_cancer", "comorbidity_metastatic_cancer", "comorbidity_HIV",
+    "comorbidity_liver_mild", "comorbidity_liver_severe",
+    "on_vasopressor", "on_mechanical_ventilation", "on_rrt", "on_hfnc_niv", "on_heparin",
+    "on_tpn", "on_steroid", "on_cefepime", "on_linezolid", "on_qtc_med", "on_anticholinergic",
+    "nephrotoxin_count", "total_discharge_meds",
+]
+
+# Full-name labels for every column, for the reference table in the
+# upload expander -- the model itself only ever sees the short names.
+FIELD_DISPLAY_NAMES = {
+    "patient_id": "Patient ID", "sex": "Sex", "icu_unit": "ICU Unit",
+    "admission_date": "Admission Date", "discharge_due_date": "Discharge Due Date",
+    "age": "Age (years)", "icu_los_days": "Days in ICU So Far",
+    "prior_admissions_1yr": "Prior Admissions (past 1 year)",
+    "heart_rate": "Heart Rate (bpm)", "systolic_bp": "Systolic Blood Pressure (mmHg)",
+    "diastolic_bp": "Diastolic Blood Pressure (mmHg)", "respiratory_rate": "Respiratory Rate (breaths/min)",
+    "spo2": "Oxygen Saturation (SpO2 %)", "fio2": "Fraction of Inspired Oxygen (FiO2 %)",
+    "gcs_total": "Glasgow Coma Scale (Total)", "rass_min": "RASS Sedation Score (lowest)",
+    "urine_output_24h": "Urine Output, 24h (mL)", "fluid_balance_24h": "Fluid Balance, 24h (mL)",
+    "map_min": "Mean Arterial Pressure, lowest (mmHg)", "sofa_total": "SOFA Score (Day 1 Total)",
+    "creatinine_baseline": "Creatinine, Baseline (mg/dL)", "creatinine_current": "Creatinine, Current (mg/dL)",
+    "lactate_peak": "Lactate, Peak (mmol/L)", "wbc_first": "White Blood Cell Count, First (K/uL)",
+    "magnesium_first": "Magnesium, First (mEq/L)", "phosphate_first": "Phosphate, First (mg/dL)",
+    "troponin_t_peak": "Troponin T, Peak (ng/mL)", "fibrinogen_first": "Fibrinogen, First (mg/dL)",
+    "haemoglobin_latest": "Hemoglobin, Latest (g/dL)", "glucose_current": "Glucose, Current (mg/dL)",
+    "comorbidity_MI": "Comorbidity: Myocardial Infarction", "comorbidity_CHF": "Comorbidity: Congestive Heart Failure",
+    "comorbidity_PVD": "Comorbidity: Peripheral Vascular Disease", "comorbidity_stroke": "Comorbidity: Stroke",
+    "comorbidity_dementia": "Comorbidity: Dementia", "comorbidity_COPD": "Comorbidity: COPD",
+    "comorbidity_diabetes_uncomplicated": "Comorbidity: Diabetes (Uncomplicated)",
+    "comorbidity_diabetes_complicated": "Comorbidity: Diabetes (Complicated)",
+    "comorbidity_CKD": "Comorbidity: Chronic Kidney Disease", "comorbidity_paraplegia": "Comorbidity: Paraplegia",
+    "comorbidity_cancer": "Comorbidity: Cancer", "comorbidity_metastatic_cancer": "Comorbidity: Metastatic Cancer",
+    "comorbidity_HIV": "Comorbidity: HIV", "comorbidity_liver_mild": "Comorbidity: Liver Disease (Mild)",
+    "comorbidity_liver_severe": "Comorbidity: Liver Disease (Severe)",
+    "on_vasopressor": "On Vasopressor (1/0)", "on_mechanical_ventilation": "On Mechanical Ventilation (1/0)",
+    "on_rrt": "On Renal Replacement Therapy / Dialysis (1/0)", "on_hfnc_niv": "On High-Flow O2 / NIV (1/0)",
+    "on_heparin": "On Heparin (1/0)", "on_tpn": "On TPN (1/0)", "on_steroid": "On Corticosteroids (1/0)",
+    "on_cefepime": "On Cefepime (1/0)", "on_linezolid": "On Linezolid (1/0)",
+    "on_qtc_med": "On QTc-Prolonging Medication (1/0)", "on_anticholinergic": "On Anticholinergic Medication (1/0)",
+    "nephrotoxin_count": "Number of Active Nephrotoxic Drugs", "total_discharge_meds": "Total Discharge Medications",
+}
 
 
 def render():
@@ -44,15 +104,41 @@ def render():
 
 
 def _render_csv_upload():
-    with st.expander("Required columns"):
-        st.write(
-            "Your CSV should follow the same schema as `optoc_sample_patients.csv` "
-            "(raw Tier-1 clinical fields, not the pre-engineered model features)."
+    with open(SAMPLE_DATA_PATH, "rb") as f:
+        st.download_button(
+            "Sample: optoc_sample_patients.csv",
+            data=f.read(),
+            file_name="optoc_sample_patients.csv",
+            mime="text/csv",
+            help="The actual sample data used in this study -- the same 10 patients shown on "
+                 "the Homepage. Provided as a reference for the expected format.",
         )
-        st.code(", ".join(RAW_REQUIRED_COLUMNS) + ", ... (comorbidity_*, on_* medication flags)",
-                 language="text")
-        st.caption("A downloadable template isn't wired up in this build — use "
-                     "data/optoc_sample_patients.csv in the project folder as a template.")
+
+    st.download_button(
+        "Download CSV template",
+        data=pd.DataFrame(columns=FULL_TEMPLATE_COLUMNS).to_csv(index=False).encode("utf-8"),
+        file_name="optoc_data_template.csv",
+        mime="text/csv",
+        help="A blank CSV with every column pre-labeled and in the correct order -- "
+             "fill in one row per patient and upload it below.",
+    )
+
+    with st.expander("Column reference (full names)"):
+        st.write(
+            "The template above matches the same raw schema as `optoc_sample_patients.csv` "
+            "(raw Tier-1 clinical fields, not the pre-engineered model features the model "
+            "actually runs on -- the model only ever sees the short column names below; the "
+            "full names here are just for reference while filling out the template)."
+        )
+        ref = pd.DataFrame([
+            {
+                "Column Name": col,
+                "Full Name": FIELD_DISPLAY_NAMES.get(col, col.replace("_", " ").title()),
+                "Required": "Yes" if col in RAW_REQUIRED_COLUMNS else "Optional",
+            }
+            for col in FULL_TEMPLATE_COLUMNS
+        ])
+        st.dataframe(ref, use_container_width=True, hide_index=True)
 
     uploaded = st.file_uploader("Upload patient data CSV", type=["csv"])
     if uploaded is None:
@@ -67,15 +153,17 @@ def _render_csv_upload():
     st.subheader("Column Validation")
     for col in RAW_REQUIRED_COLUMNS:
         if col in df_input.columns:
-            st.write(f"✅ {col}")
+            st.markdown(f'<span style="color:{RISK_COLORS["LOW"]["text"]};">Present</span> — {col}',
+                        unsafe_allow_html=True)
         else:
-            st.write(f"❌ {col} (missing)")
+            st.markdown(f'<span style="color:{RISK_COLORS["HIGH"]["text"]};">Missing</span> — {col}',
+                        unsafe_allow_html=True)
 
     if missing:
         st.error(f"Missing required columns: {missing}")
         return
 
-    if st.button("🚀 Run Risk Predictions"):
+    if st.button("Run Risk Predictions"):
         with st.spinner("Running ML models... this may take a few seconds."):
             feature_df, patient_ids = build_features_df(df_input)
             registry = load_registry()
@@ -86,9 +174,14 @@ def _render_csv_upload():
                 result[f"{outcome}_risk"] = probs
                 threshold = registry[outcome]["threshold"]
                 result[f"{outcome}_tier"] = [risk_tier(p, threshold) for p in probs]
+            # Weighted to match validate_dashboard.py's COMPOSITE_WEIGHTS
+            # exactly (35% mortality, 30% sepsis, 25% AKI, 10% readmission)
+            # -- not an unweighted mean.
             result["composite_score"] = (
-                result[["aki_risk", "sepsis_risk", "mortality_risk", "readmission_risk"]].mean(axis=1) * 100
-            ).round(1)
+                0.35 * result["mortality_risk"] + 0.30 * result["sepsis_risk"]
+                + 0.25 * result["aki_risk"] + 0.10 * result["readmission_risk"]
+            ) * 100
+            result["composite_score"] = result["composite_score"].round(1)
 
         st.success(f"Risk predictions complete for {len(result)} patient(s).")
         _show_results_table(result)
@@ -178,7 +271,7 @@ def _render_manual_entry():
             "comorbidity_metastatic_cancer": c5.checkbox("Metastatic Cancer"),
         })
 
-        submitted = st.form_submit_button("🚀 Run Risk Predictions")
+        submitted = st.form_submit_button("Run Risk Predictions")
 
     if submitted:
         row = {
@@ -212,9 +305,14 @@ def _render_manual_entry():
                 result[f"{outcome}_risk"] = probs
                 threshold = registry[outcome]["threshold"]
                 result[f"{outcome}_tier"] = [risk_tier(p, threshold) for p in probs]
+            # Weighted to match validate_dashboard.py's COMPOSITE_WEIGHTS
+            # exactly (35% mortality, 30% sepsis, 25% AKI, 10% readmission)
+            # -- not an unweighted mean.
             result["composite_score"] = (
-                result[["aki_risk", "sepsis_risk", "mortality_risk", "readmission_risk"]].mean(axis=1) * 100
-            ).round(1)
+                0.35 * result["mortality_risk"] + 0.30 * result["sepsis_risk"]
+                + 0.25 * result["aki_risk"] + 0.10 * result["readmission_risk"]
+            ) * 100
+            result["composite_score"] = result["composite_score"].round(1)
 
         st.success("Risk prediction complete.")
         _show_results_table(result)
@@ -222,6 +320,11 @@ def _render_manual_entry():
 
 def _show_results_table(result):
     st.markdown("### Results")
+    st.caption(
+        "This is a standalone sandbox run: these results are not saved, are not added to the "
+        "Homepage census or any other tab, and are not compared against the resident patient "
+        "cohort. Download the CSV below if you need to keep them."
+    )
     display_cols = ["patient_id", "aki_risk", "aki_tier", "sepsis_risk", "sepsis_tier",
                      "mortality_risk", "mortality_tier", "readmission_risk", "readmission_tier",
                      "composite_score"]
@@ -239,7 +342,7 @@ def _show_results_table(result):
     st.dataframe(styled, use_container_width=True, hide_index=True)
 
     st.download_button(
-        "⬇️ Download results as CSV",
+        "Download results as CSV",
         data=result.to_csv(index=False).encode("utf-8"),
         file_name="optoc_try_your_data_results.csv",
         mime="text/csv",

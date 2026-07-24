@@ -86,15 +86,18 @@ def get_medication_alerts(p, aki_risk=None):
     if aki_risk is not None and aki_risk > 0.70 and nephrotoxin_count >= 1:
         alerts.append({
             "severity": "CRITICAL",
-            "text": "CRITICAL: High AKI risk AND active nephrotoxic drug. Urgent pharmacist review recommended.",
+            "text": "CRITICAL: High AKI risk AND active nephrotoxic drug. Recommend holding or "
+                    "renally adjusting the nephrotoxic agent(s), obtaining a repeat renal panel, "
+                    "and urgent pharmacist review.",
         })
 
     # --- QTc risk ---
     if p.get("on_qtc_med", 0):
         alerts.append({
             "severity": "WARNING",
-            "text": "WARNING: QTc-prolonging medication detected. Monitor ECG and QTc interval, "
-                    "especially in combination with other QT-prolonging drugs.",
+            "text": "WARNING: QTc-prolonging medication detected. Obtain a baseline or repeat ECG "
+                    "and monitor the QTc interval closely, especially in combination with other "
+                    "QT-prolonging drugs; review concomitant medications for additive risk.",
         })
 
     # --- Anticholinergic ---
@@ -102,7 +105,7 @@ def get_medication_alerts(p, aki_risk=None):
         alerts.append({
             "severity": "WARNING",
             "text": "WARNING: Anticholinergic medication detected. Increased delirium risk in ICU. "
-                    "Review medication necessity.",
+                    "Review medication necessity and consider de-prescribing if not essential.",
         })
 
     # --- Cefepime + altered mental status ---
@@ -113,7 +116,8 @@ def get_medication_alerts(p, aki_risk=None):
         alerts.append({
             "severity": "WARNING",
             "text": "WARNING: Cefepime exposure with altered mental status. Monitor for "
-                    "cefepime-induced neurotoxicity (encephalopathy, seizures).",
+                    "cefepime-induced neurotoxicity (encephalopathy, seizures) and confirm the "
+                    "dose is renally adjusted.",
         })
 
     # --- Linezolid + thrombocytopenia/declining platelets ---

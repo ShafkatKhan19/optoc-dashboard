@@ -26,7 +26,6 @@ code uses the file, not the prose count.
 import os
 import warnings
 import joblib
-import numpy as np
 import pandas as pd
 import streamlit as st
 
@@ -77,18 +76,6 @@ def load_registry():
         }
 
     return registry
-
-
-def get_background_medians():
-    """Median of every required feature, computed from the AKI model's
-    LIME background (a real training-set sample) -- used to impute any
-    feature a raw patient row doesn't have a value for (e.g.
-    mrci_simplified, which isn't collected anywhere in the sample data)."""
-    registry = load_registry()
-    bg = registry["aki"]["lime_background"]
-    cols = [c.replace("num__", "") for c in bg["feature_names"]]
-    medians = np.median(bg["background"], axis=0)
-    return pd.Series(medians, index=cols)[REQUIRED_FEATURE_COLUMNS]
 
 
 def predict_all(feature_df):

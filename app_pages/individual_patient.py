@@ -1,89 +1,349 @@
 """
 app_pages/individual_patient.py -- Tab 2: Individual Patient Profile
 
-Per spec: deep dive on one patient. 5 gauges (AKI/Sepsis/Mortality/
-Readmission/Composite), composite tier badge, 7-domain panel, outcome
-selector (Mortality/Readmission only) driving two independent
-explanation charts (SHAP = Contributing Factors, LIME = Personalized
-Risk Summary), vitals snapshot, medication profile + alerts,
-time-series trends, pharmacist note, print summary.
+Restructured around the clinical workflow rather than the AI workflow:
+opens with an auto-generated clinical summary + prioritized pharmacist
+actions, then a compact per-outcome risk summary (replacing 5 full
+gauge charts), 7-domain panel, vitals/labs, comorbidities, medication
+alerts, vital-sign trends, pharmacist note, and print summary. The
+SHAP/LIME explainability deep-dive now lives only in the Clinical
+Insights tab (reached via "More Details") -- keeping it here too was
+pure duplication of the same charts.
 """
 
+import pandas as pd
 import streamlit as st
 import plotly.graph_objects as go
 
-from core.theme import page_header, risk_badge_html, risk_tier, RISK_COLORS
-from core.data_io import get_patient_row, get_patient_feature_row, get_patient_timeseries
-from core.model_registry import load_registry, OUTCOME_LABELS
-from core.explainers import shap_patient_factors, lime_patient_factors
-from core.scoring import DOMAIN_FUNCTIONS, DOMAIN_LABELS
-from core.med_alerts import get_medication_alerts, SEVERITY_STYLE_CLASS
+from core.theme import page_header, risk_badge_html, RISK_COLORS
+from core.data_io import get_patient_row, get_patient_timeseries
+from core.model_registry import OUTCOME_LABELS
+from core.scoring import DOMAIN_FUNCTIONS, DOMAIN_LABELS, DOMAIN_DATA_COMPLETENESS
+from core.med_alerts import get_medication_alerts
 
 OUTCOME_KEYS = ["aki", "sepsis", "mortality", "readmission"]
 
-
-def _gauge(value_pct, title, tier, clickable_note=""):
-    color = RISK_COLORS[tier]["border"]
-    fig = go.Figure(go.Indicator(
-        mode="gauge+number",
-        value=value_pct,
-        title={"text": title, "font": {"size": 14}},
-        gauge={
-            "axis": {"range": [0, 100]},
-            "bar": {"color": color},
-            "steps": [
-                {"range": [0, 40], "color": RISK_COLORS["LOW"]["bg"]},
-                {"range": [40, 70], "color": RISK_COLORS["MEDIUM"]["bg"]},
-                {"range": [70, 100], "color": RISK_COLORS["HIGH"]["bg"]},
-            ],
-        },
-    ))
-    fig.update_layout(height=200, margin=dict(t=40, b=10, l=20, r=20))
-    return fig
+# Generic recommended action per domain, used to build the priority
+# actions list when a domain is HIGH and isn't already covered by a
+# more specific medication alert recommendation.
+DOMAIN_ACTIONS = {
+    "Neuro": "Reassess sedation depth and delirium risk (review sedating/anticholinergic medications)",
+    "Pulmonary": "Reassess respiratory support and ventilator weaning readiness",
+    "Cardio": "Reassess hemodynamic support (fluids/vasopressors) and monitor perfusion (lactate, MAP)",
+    "Renal": "Review nephrotoxic medications and adjust renal dosing",
+    "GI": "Monitor electrolytes and glucose closely",
+    "Heme": "Monitor coagulation status and platelet trend",
+    "ID": "Reassess antimicrobial regimen and infection source control",
+}
 
 
-def render(enriched_df, feature_df, timeseries_df, pid):
-    registry = load_registry()
-    p = get_patient_row(enriched_df, pid)
-    if p is None:
-        st.warning("No patient selected.")
-        return
+def _clinical_summary(p, domain_data, alerts):
+    """Rule-based synthesis (not free-text AI generation) of this
+    patient's top clinical drivers and a short prioritized action list,
+    built from the same 7-domain scoring rules and medication alert
+    logic already used elsewhere on this page -- not new/separate logic,
+    just surfaced first instead of last."""
+    ranked = sorted(
+        [(d, score, level, reasons) for d, (score, level, reasons) in domain_data.items()
+         if level in ("HIGH", "MODERATE")],
+        key=lambda x: x[1], reverse=True,
+    )
 
-    st.markdown('<div class="optoc-section-title">Individual Patient Profile</div>', unsafe_allow_html=True)
+    driver_phrases = []
+    for domain, score, level, reasons in ranked[:4]:
+        if reasons:
+            top_reason = max(reasons, key=lambda r: r[1])[0]
+            driver_phrases.append(f"{DOMAIN_LABELS[domain].lower()} ({top_reason.lower()})")
+        else:
+            driver_phrases.append(DOMAIN_LABELS[domain].lower())
 
+    if driver_phrases:
+        joined = (driver_phrases[0] if len(driver_phrases) == 1
+                  else ", ".join(driver_phrases[:-1]) + f", and {driver_phrases[-1]}")
+        summary = f"This patient's elevated risk appears driven primarily by {joined}."
+    else:
+        summary = (
+            f"No single dominant clinical driver was identified from the current 7-domain "
+            f"assessment -- the {p['composite_tier'].lower()} composite risk reflects the "
+            f"underlying outcome models rather than one flagged domain."
+        )
+
+    actionable_alerts = [a for a in alerts if a["severity"] in ("CRITICAL", "ACTION NEEDED", "WARNING")]
+    interventions = []
+    for a in actionable_alerts:
+        clause = a["text"].split(": ", 1)[-1] if ": " in a["text"] else a["text"]
+        interventions.append(clause)
+    for domain, score, level, reasons in ranked:
+        if level == "HIGH" and domain in DOMAIN_ACTIONS:
+            interventions.append(DOMAIN_ACTIONS[domain])
+
+    seen, deduped = set(), []
+    for item in interventions:
+        key = item.lower()
+        if key not in seen:
+            seen.add(key)
+            deduped.append(item)
+
+    return summary, deduped[:5]
+
+
+def _fmt_submetric(val):
+    if val is None:
+        return "N/A"
+    if isinstance(val, float) and val != val:  # NaN
+        return "N/A"
+    return val
+
+
+def _submetric_badge(label, val, unit=""):
+    display = _fmt_submetric(val)
+    if display != "N/A" and unit:
+        display = f"{display} {unit}"
     st.markdown(
         f"""
-        <div style="background-color:#0F172A; color:white; padding:14px 20px;
-                     border-radius:10px; margin-bottom:14px;">
-            <b>Patient ID:</b> {p['patient_id']} &nbsp;|&nbsp;
-            <b>Age:</b> {p['age']} &nbsp;|&nbsp; <b>Sex:</b> {p['sex']} &nbsp;|&nbsp;
-            <b>ICU Unit:</b> {p['icu_unit']} &nbsp;|&nbsp;
-            <b>Days in ICU:</b> {p['days_in_icu']} &nbsp;|&nbsp;
-            <b>Admitted:</b> {p['admission_date']} &nbsp;|&nbsp;
-            <b>Discharge Due:</b> {p['discharge_due_date']}
+        <div style="background-color:#F8FAFC; border:1px solid #E2E8F0; border-radius:8px;
+                     padding:5px 10px; text-align:center; margin:2px 0 10px 0;">
+            <span style="color:#64748B; font-size:11px;">{label}:</span>
+            <span style="font-weight:700; font-size:13px; color:#0F172A;">{display}</span>
         </div>
         """,
         unsafe_allow_html=True,
     )
 
+
+def render(enriched_df, timeseries_df, pid):
+    p = get_patient_row(enriched_df, pid)
+    if p is None:
+        st.warning("No patient selected.")
+        return
+
+    # Computed once here, reused for the "why you're here" callout (if
+    # arriving via a Priority Alert jump), the Clinical Summary at the
+    # top of the page, and the Medication Alerts section further down.
+    alerts = get_medication_alerts(p, aki_risk=p["aki_risk"])
+    critical_alerts = [a for a in alerts if a["severity"] in ("CRITICAL", "ACTION NEEDED")]
+
+    # 7-domain scores computed once here too (score, level, reasons per
+    # domain) -- feeds the Clinical Summary at the top AND the 7-Domain
+    # Risk Panel further down, so it's not calculated twice.
+    domain_data = {domain: fn(p) for domain, fn in DOMAIN_FUNCTIONS.items()}
+
+    # Time-series fetched once here, reused by both the Vitals & Labs
+    # trend arrows and the Vital Details charts further down.
+    ts = get_patient_timeseries(timeseries_df, pid)
+
+    st.markdown('<div class="optoc-section-title">Individual Patient Profile</div>', unsafe_allow_html=True)
+
+    if st.session_state.pop("jump_to_med_alerts", False) and critical_alerts:
+        callout_lines = "".join(f"<div style='margin-top:4px;'>&bull; {a['text']}</div>" for a in critical_alerts)
+        st.markdown(
+            f"""
+            <div style="background-color:{RISK_COLORS['HIGH']['bg']}; border-left:4px solid {RISK_COLORS['HIGH']['border']};
+                         color:{RISK_COLORS['HIGH']['text']}; border-radius:8px; padding:10px 14px; margin-bottom:12px;">
+                <div style="font-weight:800;">OPENED BECAUSE: CRITICAL MEDICATION ALERT</div>
+                {callout_lines}
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
     # ------------------------------------------------------------
-    # 5 gauges
+    # Previous/Next patient, so working through the census doesn't
+    # require re-opening the sidebar dropdown for every patient.
     # ------------------------------------------------------------
-    gauge_cols = st.columns(5)
+    all_ids = enriched_df["patient_id"].tolist()
+    current_idx = all_ids.index(pid) if pid in all_ids else 0
+    nav_prev, nav_pos, nav_next = st.columns([1, 2, 1])
+    with nav_prev:
+        if st.button("Previous Patient", use_container_width=True, disabled=current_idx <= 0):
+            st.session_state["selected_patient"] = all_ids[current_idx - 1]
+            st.rerun()
+    with nav_pos:
+        st.markdown(
+            f"<div style='text-align:center; padding-top:8px; color:#64748B; font-size:13px;'>"
+            f"Patient {current_idx + 1} of {len(all_ids)}</div>",
+            unsafe_allow_html=True,
+        )
+    with nav_next:
+        if st.button("Next Patient", use_container_width=True, disabled=current_idx >= len(all_ids) - 1):
+            st.session_state["selected_patient"] = all_ids[current_idx + 1]
+            st.rerun()
+
+    # ------------------------------------------------------------
+    # Rounds Mode: hides secondary sections (7-Domain panel, Comorbidities,
+    # Vital Details charts, Print Summary) so everything needed at the
+    # bedside -- clinical summary, priority actions, compact outcome
+    # tiers, medication alerts, and key lab trends -- fits on one screen
+    # without scrolling past deep-dive material.
+    # ------------------------------------------------------------
+    with st.container(key="rounds_mode_wrap"):
+        st.markdown(
+            """
+            <style>
+            div.st-key-rounds_mode_wrap {
+                transform: scale(1.3);
+                transform-origin: left center;
+                margin: 4px 0 14px 0;
+            }
+            div.st-key-rounds_mode_wrap label p {
+                font-weight: 800 !important;
+                color: #0F172A !important;
+            }
+            </style>
+            """,
+            unsafe_allow_html=True,
+        )
+        # key="rounds_mode" directly (not a value= computed from this same
+        # session_state key) -- that circular pattern is the exact bug
+        # that made the sidebar Patient ID selector need two clicks
+        # earlier in this project; same fix applies here.
+        rounds_mode = st.toggle(
+            "Rounds Mode", key="rounds_mode",
+            help="Hides secondary detail (domain panel, comorbidities, vital-sign trend charts, "
+                 "print summary) so the essentials fit on one screen.",
+        )
+
+    if "archived_patients" not in st.session_state:
+        st.session_state["archived_patients"] = set()
+    is_archived = pid in st.session_state["archived_patients"]
+
+    header_col, action_col = st.columns([5, 1], vertical_alignment="center")
+    with header_col:
+        archived_note = " &nbsp;|&nbsp; <b style=\"color:#F59E0B;\">ARCHIVED</b>" if is_archived else ""
+        st.markdown(
+            f"""
+            <div style="background-color:#0F172A; color:white; padding:14px 20px;
+                         border-radius:10px; margin-bottom:0;">
+                <b>Patient ID:</b> {p['patient_id']} &nbsp;|&nbsp;
+                <b>Age:</b> {p['age']} &nbsp;|&nbsp; <b>Sex:</b> {p['sex']} &nbsp;|&nbsp;
+                <b>ICU Unit:</b> {p['icu_unit']} &nbsp;|&nbsp;
+                <b>Days in ICU:</b> {p['days_in_icu']} &nbsp;|&nbsp;
+                <b>Admitted:</b> {p['admission_date']}{archived_note}
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+    with action_col:
+        with st.container(key="discharge_archive_btn_wrap"):
+            st.markdown(
+                """
+                <style>
+                div.st-key-discharge_archive_btn_wrap button {
+                    background-color: #0F172A !important;
+                    color: #FFFFFF !important;
+                    border: none !important;
+                    border-radius: 10px !important;
+                    padding: 14px 8px !important;
+                    height: auto !important;
+                    font-weight: 700 !important;
+                }
+                div.st-key-discharge_archive_btn_wrap button:hover {
+                    background-color: #1E293B !important;
+                    color: #F59E0B !important;
+                }
+                </style>
+                """,
+                unsafe_allow_html=True,
+            )
+            if is_archived:
+                if st.button("Unarchive", use_container_width=True):
+                    st.session_state["archived_patients"].discard(pid)
+                    st.rerun()
+            else:
+                if st.button("Discharge and Archive", use_container_width=True):
+                    st.session_state["archived_patients"].add(pid)
+                    st.rerun()
+    if not is_archived:
+        st.caption(
+            "Discharging and archiving hides this patient from the dropdown, rankings, and "
+            "heatmap by default (check \"Show archived patients\" in the sidebar to bring them "
+            "back). No data is deleted, and this resets if the app restarts -- there's no "
+            "database behind this demo."
+        )
+
+    # ------------------------------------------------------------
+    # Clinical Summary & Priority Actions -- the centerpiece, seen
+    # immediately on opening the patient. Everything below supports this.
+    # ------------------------------------------------------------
+    st.markdown('<div class="optoc-section-title">Clinical Summary &amp; Priority Actions</div>',
+                unsafe_allow_html=True)
+    st.caption(
+        "Auto-generated from this patient's 7-domain scoring and medication alerts below -- a "
+        "rule-based synthesis of already-computed flags, not free-text AI generation."
+    )
+    summary_text, interventions = _clinical_summary(p, domain_data, alerts)
+    st.markdown(f'<div class="optoc-card" style="font-size:15.5px;">{summary_text}</div>',
+                unsafe_allow_html=True)
+    if interventions:
+        st.markdown("**Suggested Priority Actions:**")
+        for i, item in enumerate(interventions, 1):
+            st.markdown(f"{i}. {item}")
+    else:
+        st.caption("No specific priority actions flagged for this patient at this time.")
+
+    st.markdown("---")
+
+    # ------------------------------------------------------------
+    # Compact outcome summary -- tier + % for all 4 outcomes plus
+    # composite, replacing 5 full gauge charts. Same information, far
+    # less vertical space, leaving room for the clinical content above.
+    # ------------------------------------------------------------
+    submetric_map = {
+        "aki": ("Creatinine", p.get("creatinine_current"), "mg/dL"),
+        "sepsis": ("WBC", p.get("wbc_first"), "K/uL"),
+        "mortality": ("Lactate Peak", p.get("lactate_peak"), "mmol/L"),
+        "readmission": ("Days in ICU", p.get("days_in_icu"), ""),
+    }
+
+    outcome_cols = st.columns(5)
     for i, outcome in enumerate(OUTCOME_KEYS):
         risk_pct = p[f"{outcome}_risk"] * 100
         tier = p[f"{outcome}_tier"]
-        with gauge_cols[i]:
-            st.plotly_chart(_gauge(risk_pct, OUTCOME_LABELS[outcome], tier), use_container_width=True)
-            if st.button(f"View {OUTCOME_LABELS[outcome]} details →", key=f"gauge_{outcome}"):
-                st.session_state["active_tab"] = "Risk Profile"
-                st.session_state["selected_outcome"] = outcome
-                st.session_state["selected_patient"] = pid
-                st.rerun()
+        color = RISK_COLORS[tier]["border"]
+        label, val, unit = submetric_map[outcome]
+        with outcome_cols[i]:
+            with st.container(border=True):
+                st.markdown(
+                    f"""
+                    <div style="text-align:center; padding:4px 0;">
+                        <div style="font-size:13px; color:#64748B; font-weight:600;">{OUTCOME_LABELS[outcome]}</div>
+                        <div style="font-size:28px; font-weight:800; color:{color}; margin:2px 0;">{risk_pct:.0f}%</div>
+                        {risk_badge_html(tier)}
+                    </div>
+                    """,
+                    unsafe_allow_html=True,
+                )
+                _submetric_badge(label, val, unit)
+                if st.button("More Details", key=f"gauge_{outcome}", use_container_width=True):
+                    st.session_state["active_tab"] = "Clinical Insights"
+                    st.session_state["selected_outcome"] = outcome
+                    st.session_state["selected_patient"] = pid
+                    st.rerun()
 
-    with gauge_cols[4]:
-        st.plotly_chart(_gauge(p["composite_score"], "Composite Score", p["composite_tier"]),
-                         use_container_width=True)
+    with outcome_cols[4]:
+        with st.container(border=True):
+            composite_color = RISK_COLORS[p["composite_tier"]]["border"]
+            st.markdown(
+                f"""
+                <div style="text-align:center; padding:4px 0;">
+                    <div style="font-size:13px; color:#64748B; font-weight:600;">Composite Score</div>
+                    <div style="font-size:28px; font-weight:800; color:{composite_color}; margin:2px 0;">
+                        {p['composite_score']:.0f}%</div>
+                    {risk_badge_html(p['composite_tier'])}
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+            _submetric_badge("Nephrotoxic Drugs", p.get("nephrotoxin_count"))
+            # A plain button (not st.expander) so this card matches the
+            # other four's exact size/style -- an expander renders with
+            # its own border/chevron and doesn't line up with them.
+            if st.button("More Details", key="composite_more_details", use_container_width=True):
+                st.session_state["show_composite_formula"] = not st.session_state.get(
+                    "show_composite_formula", False
+                )
+            if st.session_state.get("show_composite_formula"):
+                st.caption("Composite Score = 35% Mortality + 30% Sepsis + 25% AKI + 10% Readmission risk")
 
     # ------------------------------------------------------------
     # Composite tier badge
@@ -91,8 +351,8 @@ def render(enriched_df, feature_df, timeseries_df, pid):
     st.markdown(
         f"""
         <div style="text-align:center; margin: 10px 0 20px 0;">
-            {risk_badge_html(p['composite_tier'], f"{p['composite_tier']} RISK")}
-            <div style="margin-top:6px;">This patient is classified as
+            {risk_badge_html(p['composite_tier'], f"{p['composite_tier']} RISK", font_size="22px", padding="8px 22px")}
+            <div style="margin-top:10px; font-size:17px;">This patient is classified as
             <b>{p['composite_tier']}</b> risk based on a composite score of
             <b>{p['composite_score']:.0f}%</b>.</div>
         </div>
@@ -100,95 +360,209 @@ def render(enriched_df, feature_df, timeseries_df, pid):
         unsafe_allow_html=True,
     )
 
-    st.markdown("---")
+    if not rounds_mode:
+        st.markdown("---")
 
-    # ------------------------------------------------------------
-    # 7-Domain Risk Panel
-    # ------------------------------------------------------------
-    st.markdown('<div class="optoc-section-title">7-Domain Risk Panel</div>', unsafe_allow_html=True)
-    domain_cols = st.columns(7)
-    for i, (domain, fn) in enumerate(DOMAIN_FUNCTIONS.items()):
-        score, level, reasons = fn(p)
-        with domain_cols[i]:
-            st.markdown(f"**{DOMAIN_LABELS[domain]}**")
-            st.markdown(risk_badge_html(level), unsafe_allow_html=True)
-            st.caption(f"Score: {score}")
-            with st.expander("Drivers"):
-                if reasons:
-                    for text, pts in reasons:
-                        st.write(f"- {text} (+{pts})")
-                else:
-                    st.write("No contributing factors flagged.")
-            if st.button("View in heatmap →", key=f"domain_{domain}"):
-                st.session_state["active_tab"] = "Domain Specific Risk"
-                st.session_state["selected_patient"] = pid
-                st.rerun()
+        # ------------------------------------------------------------
+        # 7-Domain Risk Panel (hidden in Rounds Mode)
+        # ------------------------------------------------------------
+        st.markdown('<div class="optoc-section-title">7-Domain Risk Panel</div>', unsafe_allow_html=True)
+        st.caption(
+            "Each domain's badge is only as reliable as the data behind it -- see the \"criteria "
+            "scorable\" note under each card. A LOW badge on a low-completeness domain means "
+            "\"not enough data to flag,\" not \"verified low.\""
+        )
+        # Cards are informational only (no per-card button) -- a single
+        # shared button below covers all 7 domains' details at once,
+        # instead of one toggle per card.
+        domain_cols = st.columns(7)
+        for i, domain in enumerate(DOMAIN_FUNCTIONS.keys()):
+            score, level, reasons = domain_data[domain]
+            avail, total = DOMAIN_DATA_COMPLETENESS[domain]
+            with domain_cols[i]:
+                with st.container(border=True):
+                    st.markdown(f"**{DOMAIN_LABELS[domain]}**")
+                    st.markdown(risk_badge_html(level), unsafe_allow_html=True)
+                    st.caption(f"Score: {score} · {avail}/{total} scorable")
 
-    st.markdown("---")
+        if "show_domain_details" not in st.session_state:
+            st.session_state["show_domain_details"] = False
 
-    # ------------------------------------------------------------
-    # Outcome selector (Mortality / Readmission only) + two explanation charts
-    # ------------------------------------------------------------
-    st.markdown('<div class="optoc-section-title">Why This Patient\'s Risk Is Elevated</div>',
-                unsafe_allow_html=True)
-    selected_outcome = st.radio("Explain outcome:", ["mortality", "readmission"],
-                                 format_func=lambda o: OUTCOME_LABELS[o], horizontal=True,
-                                 key="tab2_outcome_selector")
+        if st.button("Hide Domain Details" if st.session_state["show_domain_details"] else "Domain Details",
+                     use_container_width=True,
+                     type="primary" if st.session_state["show_domain_details"] else "secondary"):
+            st.session_state["show_domain_details"] = not st.session_state["show_domain_details"]
+            st.rerun()
 
-    patient_feat_row = get_patient_feature_row(feature_df, enriched_df, pid)
+        if st.session_state["show_domain_details"]:
+            with st.container(border=True):
+                for domain, (score, level, reasons) in domain_data.items():
+                    avail, total = DOMAIN_DATA_COMPLETENESS[domain]
+                    st.markdown(
+                        f"**{DOMAIN_LABELS[domain]}** &mdash; {risk_badge_html(level)} "
+                        f"<span style='color:#64748B; font-size:12px;'>Score: {score} · "
+                        f"{avail}/{total} scorable</span>",
+                        unsafe_allow_html=True,
+                    )
+                    if reasons:
+                        for text, pts in reasons:
+                            st.write(f"- {text} (+{pts})")
+                    else:
+                        st.write("No contributing factors flagged.")
+                    if level == "HIGH" and domain in DOMAIN_ACTIONS:
+                        st.markdown(f"**Recommended Action:** {DOMAIN_ACTIONS[domain]}")
+                    st.markdown("&nbsp;", unsafe_allow_html=True)
 
-    left, right = st.columns([55, 45])
-    with left:
-        st.markdown("**Contributing Factors**")
-        try:
-            shap_df = shap_patient_factors(selected_outcome, patient_feat_row, top_n=10)
-            colors = ["#C00000" if v > 0 else "#2563EB" for v in shap_df["impact"]]
-            fig = go.Figure(go.Bar(
-                x=shap_df["impact"], y=shap_df["feature"], orientation="h",
-                marker_color=colors,
-            ))
-            fig.update_layout(height=340, margin=dict(l=10, r=10, t=10, b=10),
-                                xaxis_title="Impact on risk (red = increases, blue = decreases)")
-            st.plotly_chart(fig, use_container_width=True)
-        except Exception as e:
-            st.info(f"Contributing factors unavailable: {e}")
-
-    with right:
-        outcome_risk_pct = p[f"{selected_outcome}_risk"] * 100
-        st.markdown(f"**Why this patient's {OUTCOME_LABELS[selected_outcome]} is {outcome_risk_pct:.0f}%**")
-        try:
-            lime_df = lime_patient_factors(selected_outcome, patient_feat_row, top_n=10)
-            colors = ["#C00000" if d == "Increases risk" else "#2563EB" for d in lime_df["direction"]]
-            fig = go.Figure(go.Bar(
-                x=lime_df["weight"], y=lime_df["feature"], orientation="h",
-                marker_color=colors,
-            ))
-            fig.update_layout(height=340, margin=dict(l=10, r=10, t=10, b=10))
-            st.plotly_chart(fig, use_container_width=True)
-        except Exception as e:
-            st.info(f"Personalized risk summary unavailable: {e}")
+                if st.button("View Full Population Domain Heatmap in Clinical Insights →"):
+                    st.session_state["domain_card_filter"] = None
+                    st.session_state["active_tab"] = "Clinical Insights"
+                    st.rerun()
 
     st.markdown("---")
+
+    # Full SHAP/LIME explainability (population drivers + this patient's
+    # factors, for all 4 outcomes) now lives only in the Clinical Insights
+    # tab -- reached via the "More Details" button on each outcome above.
+    # Keeping a second copy of the same charts here was pure duplication.
 
     # ------------------------------------------------------------
     # Vitals & labs snapshot
     # ------------------------------------------------------------
     st.markdown('<div class="optoc-section-title">Current Vitals & Laboratory Results</div>',
                 unsafe_allow_html=True)
+    st.caption(
+        "Cards outlined in red are outside normal range for that value. Creatinine, Lactate, and "
+        "MAP also show a trend arrow (change from first to most recent reading on file) since "
+        "these most often drive pharmacist interventions in critically ill patients. Urine output "
+        "trending isn't shown -- not present in this dataset."
+    )
+
+    def _trend_delta(ts_col):
+        """(delta, worse_if_increases) from first->last time-series
+        reading, or None if fewer than 2 readings exist for this column."""
+        if ts_col not in ts.columns:
+            return None
+        sub = ts.dropna(subset=[ts_col]).sort_values("hours_since_admission")
+        if len(sub) < 2:
+            return None
+        return float(sub[ts_col].iloc[-1] - sub[ts_col].iloc[0])
+
+    # worse_if_increases: True = an upward trend is clinically bad
+    # (Streamlit's delta_color="inverse" flips the usual green-up/red-down
+    # so a rise shows red here); MAP is the opposite -- a rise is good.
+    TREND_COLS = {"MAP": ("map", False), "Lactate": ("lactate", True), "Creatinine": ("creatinine", True)}
+
+    # Abnormal-range flags for the CURRENT value itself (not just its
+    # trend) -- reuses the same cutoffs already used in the 7-domain
+    # scoring rules where one exists (MAP<65, SpO2<92, Lactate>2.0,
+    # Fibrinogen<150), plus standard normal ranges for HR/RR/WBC/Creatinine.
+    ABNORMAL_RULES = {
+        "MAP": lambda v: v < 65,
+        "HR": lambda v: v < 60 or v > 100,
+        "RR": lambda v: v < 12 or v > 20,
+        "SpO2": lambda v: v < 92,
+        "Lactate": lambda v: v > 2.0,
+        "Creatinine": lambda v: v > 1.3,
+        "WBC": lambda v: v < 4 or v > 11,
+        "Fibrinogen": lambda v: v < 150,
+    }
+
+    # MAP is missing (NaN) in the raw data for some patients -- the model
+    # and 7-domain scoring both fall back to (SBP + 2*DBP) / 3 in that
+    # case (see core/features.py, core/scoring.py), but that fallback was
+    # never applied here, so this card was printing the literal string
+    # "nan" instead of either a real number or "N/A". Matching the same
+    # fallback here, labeled as derived so it's not mistaken for a
+    # directly measured reading.
+    map_val = p.get("map_min")
+    map_label = "MAP"
+    if pd.isna(map_val):
+        sbp, dbp = p.get("systolic_bp"), p.get("diastolic_bp")
+        if pd.notna(sbp) and pd.notna(dbp):
+            map_val = (sbp + 2 * dbp) / 3
+            map_label = "MAP (derived)"
+        else:
+            map_val = None
+
     vitals = [
-        ("MAP", p.get("map_min"), "mmHg"), ("HR", p.get("heart_rate"), "bpm"),
+        (map_label, map_val, "mmHg"), ("HR", p.get("heart_rate"), "bpm"),
         ("RR", p.get("respiratory_rate"), "br/min"), ("SpO2", p.get("spo2"), "%"),
         ("Lactate", p.get("lactate_peak"), "mmol/L"), ("Creatinine", p.get("creatinine_current"), "mg/dL"),
         ("WBC", p.get("wbc_first"), "K/uL"), ("Fibrinogen", p.get("fibrinogen_first"), "mg/dL"),
     ]
     vcols = st.columns(4)
     for i, (label, val, unit) in enumerate(vitals):
-        vcols[i % 4].metric(label, f"{val} {unit}" if val is not None else "N/A")
+        is_missing = val is None or (isinstance(val, float) and pd.isna(val))
+        value_str = "N/A" if is_missing else f"{val:.1f} {unit}"
+        rule = ABNORMAL_RULES.get(label.replace(" (derived)", ""))
+        is_abnormal = bool(not is_missing and rule and rule(val))
+        card_key = f"vital_card_{label.replace(' ', '_').replace('(', '').replace(')', '')}"
+
+        with vcols[i % 4]:
+            with st.container(border=True, key=card_key):
+                if is_abnormal:
+                    st.markdown(
+                        f"""
+                        <style>
+                        div.st-key-{card_key} {{
+                            background-color: {RISK_COLORS['HIGH']['bg']} !important;
+                            border-color: {RISK_COLORS['HIGH']['border']} !important;
+                            border-width: 2px !important;
+                        }}
+                        </style>
+                        """,
+                        unsafe_allow_html=True,
+                    )
+                trend_key = label.replace(" (derived)", "")
+                if trend_key in TREND_COLS:
+                    ts_col, worse_if_increases = TREND_COLS[trend_key]
+                    delta = _trend_delta(ts_col)
+                    if delta is not None:
+                        st.metric(label, value_str, delta=f"{delta:+.2f}",
+                                  delta_color="inverse" if worse_if_increases else "normal")
+                    else:
+                        st.metric(label, value_str)
+                else:
+                    st.metric(label, value_str)
+                if is_abnormal:
+                    st.markdown(
+                        f'<span style="color:{RISK_COLORS["HIGH"]["text"]}; font-weight:800; '
+                        f'font-size:11px;">ABNORMAL</span>',
+                        unsafe_allow_html=True,
+                    )
+
+    if not rounds_mode:
+        st.markdown("---")
+
+        # ------------------------------------------------------------
+        # Comorbidities (top 5) -- hidden in Rounds Mode
+        # ------------------------------------------------------------
+        st.markdown('<div class="optoc-section-title">Comorbidities</div>', unsafe_allow_html=True)
+        comorbidity_labels = {
+            "comorbidity_MI": "Myocardial Infarction", "comorbidity_CHF": "Congestive Heart Failure",
+            "comorbidity_PVD": "Peripheral Vascular Disease", "comorbidity_stroke": "Stroke",
+            "comorbidity_dementia": "Dementia", "comorbidity_COPD": "COPD",
+            "comorbidity_diabetes_uncomplicated": "Diabetes (Uncomplicated)",
+            "comorbidity_diabetes_complicated": "Diabetes (Complicated)",
+            "comorbidity_CKD": "Chronic Kidney Disease", "comorbidity_paraplegia": "Paraplegia",
+            "comorbidity_cancer": "Cancer", "comorbidity_metastatic_cancer": "Metastatic Cancer",
+            "comorbidity_HIV": "HIV", "comorbidity_liver_mild": "Liver Disease (Mild)",
+            "comorbidity_liver_severe": "Liver Disease (Severe)",
+        }
+        active_comorbidities = [label for col, label in comorbidity_labels.items() if p.get(col)]
+        if not active_comorbidities:
+            st.caption("No comorbidities recorded for this patient.")
+        else:
+            shown = active_comorbidities[:5]
+            st.write(", ".join(shown))
+            remaining = len(active_comorbidities) - len(shown)
+            if remaining > 0:
+                st.caption(f"+ {remaining} more not shown.")
 
     st.markdown("---")
 
     # ------------------------------------------------------------
-    # Medication profile + alerts
+    # Medication profile + alerts (always visible -- core to Rounds Mode)
     # ------------------------------------------------------------
     st.markdown('<div class="optoc-section-title">Medication Profile</div>', unsafe_allow_html=True)
     med_flags = {
@@ -203,40 +577,136 @@ def render(enriched_df, feature_df, timeseries_df, pid):
     st.caption(f"Nephrotoxic drug count: {p.get('nephrotoxin_count', 'N/A')} · "
                f"Total discharge medications: {p.get('total_discharge_meds', 'N/A')}")
 
-    st.markdown("**⚠️ Medication Alerts**")
-    alerts = get_medication_alerts(p, aki_risk=p["aki_risk"])
-    if not alerts:
+    st.markdown("**Medication Alerts**")
+    st.caption(
+        "Organized by severity -- Critical (act now) down to Routine (awareness only). Every "
+        "alert ends with a recommended pharmacist action, not just a flag."
+    )
+
+    # 4-tier severity, mapped from the existing CRITICAL/ACTION NEEDED/
+    # WARNING/INFO taxonomy in core/med_alerts.py (SEVERITY_ORDER) --
+    # not a new classification, just clearer labels for clinical use.
+    critical_items = [a["text"] for a in alerts if a["severity"] == "CRITICAL"]
+    high_items = [a["text"] for a in alerts if a["severity"] == "ACTION NEEDED"]
+    moderate_items = [a["text"] for a in alerts if a["severity"] == "WARNING"]
+    routine_items = [a["text"] for a in alerts if a["severity"] == "INFO"]
+
+    # Same "no real prior-history field" caveat as the Homepage color tags --
+    # this uses current AKI/Sepsis risk tier (HIGH) as the closest proxy
+    # for a prior episode, since optoc_sample_patients.csv has no actual
+    # prior-AKI/prior-sepsis history field.
+    prior_items = []
+    if p.get("aki_tier") == "HIGH":
+        prior_items.append("Patient has Prior AKI during the stay")
+    if p.get("sepsis_tier") == "HIGH":
+        prior_items.append("Patient has Prior Sepsis during the stay")
+
+    def _alert_box(title, items, bg, border, text_color):
+        if not items:
+            return
+        lines = "".join(f"<div style='margin-top:4px;'>&bull; {t}</div>" for t in items)
+        st.markdown(
+            f"""
+            <div style="background-color:{bg}; border-left:4px solid {border}; color:{text_color};
+                         border-radius:8px; padding:10px 14px; margin-bottom:10px;">
+                <div style="font-weight:800; letter-spacing:0.03em;">{title}</div>
+                {lines}
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+    _alert_box("CRITICAL", critical_items, RISK_COLORS["HIGH"]["bg"], RISK_COLORS["HIGH"]["border"],
+                RISK_COLORS["HIGH"]["text"])
+    _alert_box("HIGH", high_items, "#FFEDD5", "#EA580C", "#9A3412")
+    _alert_box("MODERATE", moderate_items, RISK_COLORS["MEDIUM"]["bg"], RISK_COLORS["MEDIUM"]["border"],
+                RISK_COLORS["MEDIUM"]["text"])
+    _alert_box("PRIOR AKI/SEPSIS", prior_items, "#F3E9C9", "#D4AF37", "#7A5C00")
+    _alert_box("ROUTINE", routine_items, "#E7F1FF", "#2563EB", "#1E3A8A")
+
+    if not (critical_items or high_items or moderate_items or prior_items or routine_items):
         st.success("No medication alerts triggered for this patient's current profile.")
-    else:
-        for a in alerts:
-            css_class = SEVERITY_STYLE_CLASS.get(a["severity"], "optoc-alert-info")
-            st.markdown(f'<div class="{css_class}">{a["text"]}</div>', unsafe_allow_html=True)
+
+    if not rounds_mode:
+        st.markdown("---")
+
+        # ------------------------------------------------------------
+        # Time-series trends -- hidden in Rounds Mode (the key lab trend
+        # arrows are already in Vitals & Labs above; these full charts
+        # are the deeper look, not needed mid-round)
+        # ------------------------------------------------------------
+        st.markdown('<div class="optoc-section-title">Vital Details</div>', unsafe_allow_html=True)
+        if len(ts) == 0:
+            st.info("No time-series data available for this patient.")
+        else:
+            plot_vars = [("map", "MAP (mmHg)"), ("hr", "Heart Rate (bpm)"), ("rr", "Respiratory Rate"),
+                         ("spo2", "SpO2 (%)"), ("lactate", "Lactate (mmol/L)"), ("creatinine", "Creatinine (mg/dL)")]
+            tcols = st.columns(3)
+            for i, (col, label) in enumerate(plot_vars):
+                if col in ts.columns:
+                    fig = go.Figure(go.Scatter(x=ts["hours_since_admission"], y=ts[col], mode="lines+markers"))
+                    fig.update_layout(title=dict(text=label, x=0.5, xanchor="center"), height=220,
+                                        margin=dict(t=30, b=10, l=10, r=10),
+                                        xaxis_title="Hours since admission")
+                    tcols[i % 3].plotly_chart(fig, use_container_width=True)
 
     st.markdown("---")
 
     # ------------------------------------------------------------
-    # Time-series trends
+    # Pharmacist note -- always visible, it's a rounds tool
     # ------------------------------------------------------------
-    st.markdown('<div class="optoc-section-title">Time-Series Trends</div>', unsafe_allow_html=True)
-    ts = get_patient_timeseries(timeseries_df, pid)
-    if len(ts) == 0:
-        st.info("No time-series data available for this patient.")
-    else:
-        plot_vars = [("map", "MAP (mmHg)"), ("hr", "Heart Rate (bpm)"), ("rr", "Respiratory Rate"),
-                     ("spo2", "SpO2 (%)"), ("lactate", "Lactate (mmol/L)"), ("creatinine", "Creatinine (mg/dL)")]
-        tcols = st.columns(3)
-        for i, (col, label) in enumerate(plot_vars):
-            if col in ts.columns:
-                fig = go.Figure(go.Scatter(x=ts["hours_since_admission"], y=ts[col], mode="lines+markers"))
-                fig.update_layout(title=label, height=220, margin=dict(t=30, b=10, l=10, r=10),
-                                    xaxis_title="Hours since admission")
-                tcols[i % 3].plotly_chart(fig, use_container_width=True)
+    note = st.text_area(
+        "Pharmacist note for this patient",
+        key=f"pharm_note_{pid}",
+        help="Persists for this patient for the rest of this browser session (survives switching "
+             "patients/tabs) -- not saved to a database, so it's gone if the app restarts or you "
+             "close the tab.",
+    )
+
+    if rounds_mode:
+        return
 
     st.markdown("---")
 
     # ------------------------------------------------------------
-    # Pharmacist note + print summary
+    # Print / export summary -- a clean one-page view, using window.print()
+    # scoped via @media print CSS (see core/theme.py) to only this
+    # section. Hidden in Rounds Mode (an end-of-encounter action, not
+    # needed mid-round).
     # ------------------------------------------------------------
-    st.text_area("Pharmacist note for this patient (not saved to database, for session reference only)")
-    st.caption("🖨️ Print summary: export this patient's profile as PDF is not wired up in this build "
-               "(no PDF-rendering library was in scope for this pass) -- flagged as an open item.")
+    st.markdown('<div class="optoc-section-title">Print Summary</div>', unsafe_allow_html=True)
+    st.caption("Prints just the box below (composite score, top factors, active alerts) -- "
+               "not the whole page.")
+
+    top_factors = sorted(
+        (r for score, level, reasons in domain_data.values() for r in reasons),
+        key=lambda r: r[1], reverse=True,
+    )[:3]
+    top_factors_html = "".join(f"<li>{text} (+{pts})</li>" for text, pts in top_factors) or "<li>None flagged.</li>"
+
+    all_active_alerts = critical_alerts + [a for a in alerts if a["severity"] == "WARNING"]
+    alerts_html = "".join(f"<li>{a['text']}</li>" for a in all_active_alerts) or "<li>None active.</li>"
+
+    note_html = note.replace("\n", "<br>") if note else "<em>No note entered.</em>"
+
+    st.markdown(
+        f"""
+        <div class="optoc-print-section" style="border:1px solid #E2E8F0; border-radius:10px;
+                     padding:18px 22px; background-color:#FFFFFF;">
+            <h3 style="margin-top:0;">OPTOC Patient Summary &mdash; {p['patient_id']}</h3>
+            <p><b>Age:</b> {p['age']} &nbsp;|&nbsp; <b>Sex:</b> {p['sex']} &nbsp;|&nbsp;
+               <b>ICU Unit:</b> {p['icu_unit']} &nbsp;|&nbsp; <b>Days in ICU:</b> {p['days_in_icu']}</p>
+            <p><b>Composite Score:</b> {p['composite_score']:.0f}% ({p['composite_tier']} risk)</p>
+            <p><b>Top Contributing Factors:</b></p>
+            <ul>{top_factors_html}</ul>
+            <p><b>Active Alerts:</b></p>
+            <ul>{alerts_html}</ul>
+            <p><b>Pharmacist Note:</b><br>{note_html}</p>
+        </div>
+        <button onclick="window.print()" style="margin-top:10px; background-color:#0F172A; color:white;
+                border:none; border-radius:8px; padding:10px 18px; font-weight:700; cursor:pointer;">
+            Print This Summary
+        </button>
+        """,
+        unsafe_allow_html=True,
+    )

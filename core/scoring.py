@@ -42,6 +42,26 @@ DOMAIN_COLORS = {
     "Renal": "#16a085", "GI": "#f39c12", "Heme": "#c0392b", "ID": "#27ae60",
 }
 
+# How many of each domain's scoring criteria are actually computable on
+# optoc_sample_patients.csv vs structurally inactive because the field
+# they depend on isn't in the dataset at all (counted directly from the
+# score_* functions above, not estimated). This is a property of the
+# DATASET SCHEMA, not of any individual patient -- every patient gets the
+# same completeness for a given domain. Shown in the UI so a "LOW" domain
+# score can be read correctly: it may mean "genuinely low risk" or it may
+# mean "most of this domain's criteria can't fire on this data" -- those
+# are very different things and the previous version of this dashboard
+# didn't distinguish them.
+DOMAIN_DATA_COMPLETENESS = {
+    "Neuro": (4, 6),      # missing: benzodiazepine-sedation flag, sodium
+    "Pulmonary": (4, 7),  # missing: OSA flag, benzodiazepine flag, SBT-readiness flag
+    "Cardio": (6, 9),     # missing: measured QTc, CAD flag, AFib flag
+    "Renal": (5, 8),      # missing: prior-AKI flag, per-drug pip-tazo/vancomycin flags
+    "GI": (5, 7),         # missing: glucose baseline (variability), bilirubin
+    "Heme": (2, 6),       # missing: platelet count, platelet trend, INR, sepsis flag
+    "ID": (3, 6),         # missing: sepsis-primary-diagnosis flag, per-drug pip-tazo/vancomycin flags
+}
+
 
 def risk_level(score):
     """Uniform Low/Moderate/High conversion -- SAME for every domain, per spec."""

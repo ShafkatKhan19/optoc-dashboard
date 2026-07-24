@@ -15,7 +15,7 @@ import streamlit as st
 
 from core.theme import inject_global_css
 from core.data_io import build_enriched_cohort
-from app_pages import home, individual_patient, risk_profile, domain_risk, try_your_data
+from app_pages import home, individual_patient, risk_profile, try_your_data
 
 st.set_page_config(
     page_title="OPTOC",
@@ -24,7 +24,7 @@ st.set_page_config(
 )
 inject_global_css()
 
-TABS = ["Homepage", "Individual Patient", "Risk Profile", "Domain Specific Risk", "Try Your Data!"]
+TABS = ["Homepage", "Individual Patient", "Clinical Insights", "Try Your Data!"]
 
 if "active_tab" not in st.session_state:
     st.session_state["active_tab"] = "Homepage"
@@ -37,6 +37,14 @@ with st.spinner("Loading patient data and running risk models..."):
 
 if "selected_patient" not in st.session_state:
     st.session_state["selected_patient"] = enriched_df["patient_id"].iloc[0]
+
+# Manually archived patients (e.g. discharged) -- session-only, since this
+# demo has no backing database. Archiving hides a patient from the
+# dropdown/rankings/heatmap by default without deleting any data; nothing
+# is ever removed from the underlying CSV. This resets if the app process
+# restarts -- flagged here rather than silently pretending it's permanent.
+if "archived_patients" not in st.session_state:
+    st.session_state["archived_patients"] = set()
 
 # ------------------------------------------------------------
 # Sidebar
@@ -53,12 +61,58 @@ if st.sidebar.button("Refresh Data"):
     st.cache_data.clear()
     st.rerun()
 
+n_archived = len(st.session_state["archived_patients"])
+show_archived = st.sidebar.checkbox(f"Show archived patients ({n_archived})", value=False)
+
 st.sidebar.markdown("---")
 st.sidebar.markdown("### Patient Selector")
-patient_ids = enriched_df["patient_id"].tolist()
-idx = patient_ids.index(st.session_state["selected_patient"]) if st.session_state["selected_patient"] in patient_ids else 0
-picked = st.sidebar.selectbox("Patient ID", patient_ids, index=idx)
+all_patient_ids = enriched_df["patient_id"].tolist()
+patient_ids = all_patient_ids if show_archived else [
+    p for p in all_patient_ids if p not in st.session_state["archived_patients"]
+]
+if not patient_ids:
+    # don't let an "archive everyone" state break patient selection entirely
+    patient_ids = all_patient_ids
+
+# One-way sync, external -> sidebar widget, using a sentinel to tell "you
+# just clicked this widget" apart from "selected_patient changed elsewhere
+# (e.g. a Priority Alert click on another tab)". Without the sentinel,
+# both cases look identical (sidebar_patient_select != selected_patient)
+# at this point in the script, so a naive sync stomps your own click back
+# to the old value on every interaction -- that was the bug.
+if "sidebar_patient_select" not in st.session_state or st.session_state["sidebar_patient_select"] not in patient_ids:
+    default_patient = (
+        st.session_state["selected_patient"]
+        if st.session_state["selected_patient"] in patient_ids
+        else patient_ids[0]
+    )
+    st.session_state["sidebar_patient_select"] = default_patient
+    st.session_state["_last_synced_patient"] = default_patient
+elif st.session_state["selected_patient"] != st.session_state.get("_last_synced_patient"):
+    # selected_patient moved without this widget's involvement -> catch up.
+    st.session_state["sidebar_patient_select"] = st.session_state["selected_patient"]
+    st.session_state["_last_synced_patient"] = st.session_state["selected_patient"]
+
+picked = st.sidebar.selectbox("Patient ID", patient_ids, key="sidebar_patient_select")
 st.session_state["selected_patient"] = picked
+st.session_state["_last_synced_patient"] = picked
+
+# Manual entry, for typing a Patient ID directly instead of scrolling the
+# dropdown -- normalizes "107", "p-0107", "P0107" etc. to match "P-0107".
+manual_id = st.sidebar.text_input("Or type Patient ID directly", placeholder="e.g. P-0107")
+if manual_id.strip():
+    digits = "".join(ch for ch in manual_id if ch.isalnum())
+    normalized = digits.upper()
+    match = next(
+        (p for p in patient_ids if "".join(ch for ch in p if ch.isalnum()).upper() == normalized),
+        None,
+    )
+    if match:
+        if match != st.session_state["selected_patient"]:
+            st.session_state["selected_patient"] = match
+            st.rerun()
+    else:
+        st.sidebar.caption(f'No patient found matching "{manual_id}".')
 
 short_id = picked.split("-")[-1] if "-" in picked else picked
 st.sidebar.markdown(
@@ -76,8 +130,10 @@ st.sidebar.markdown(
     unsafe_allow_html=True,
 )
 
-# Apply sidebar unit filter to the cohort used everywhere
+# Apply sidebar unit + archive filters to the cohort used everywhere
 display_df = enriched_df.copy()
+if not show_archived:
+    display_df = display_df[~display_df["patient_id"].isin(st.session_state["archived_patients"])]
 if sidebar_unit != "All":
     display_df = display_df[display_df["icu_unit"] == sidebar_unit]
     if len(display_df) and st.session_state["selected_patient"] not in display_df["patient_id"].values:
@@ -110,10 +166,8 @@ pid = st.session_state["selected_patient"]
 if active == "Homepage":
     home.render(display_df)
 elif active == "Individual Patient":
-    individual_patient.render(enriched_df, feature_df, timeseries_df, pid)
-elif active == "Risk Profile":
-    risk_profile.render(enriched_df, feature_df, pid)
-elif active == "Domain Specific Risk":
-    domain_risk.render(display_df, pid)
+    individual_patient.render(enriched_df, timeseries_df, pid)
+elif active == "Clinical Insights":
+    risk_profile.render(enriched_df, feature_df, display_df, pid)
 elif active == "Try Your Data!":
     try_your_data.render()
