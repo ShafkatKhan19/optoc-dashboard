@@ -257,8 +257,7 @@ def render(enriched_df, timeseries_df, pid):
         st.caption(
             "Discharging and archiving hides this patient from the dropdown, rankings, and "
             "heatmap by default (check \"Show archived patients\" in the sidebar to bring them "
-            "back). No data is deleted, and this resets if the app restarts -- there's no "
-            "database behind this demo."
+            "back). No data is deleted, and this resets if the app restarts."
         )
 
     # ------------------------------------------------------------
@@ -267,10 +266,6 @@ def render(enriched_df, timeseries_df, pid):
     # ------------------------------------------------------------
     st.markdown('<div class="optoc-section-title">Clinical Summary &amp; Priority Actions</div>',
                 unsafe_allow_html=True)
-    st.caption(
-        "Auto-generated from this patient's 7-domain scoring and medication alerts below -- a "
-        "rule-based synthesis of already-computed flags, not free-text AI generation."
-    )
     summary_text, interventions = _clinical_summary(p, domain_data, alerts)
     st.markdown(f'<div class="optoc-card" style="font-size:15.5px;">{summary_text}</div>',
                 unsafe_allow_html=True)
@@ -368,9 +363,8 @@ def render(enriched_df, timeseries_df, pid):
         # ------------------------------------------------------------
         st.markdown('<div class="optoc-section-title">7-Domain Risk Panel</div>', unsafe_allow_html=True)
         st.caption(
-            "Each domain's badge is only as reliable as the data behind it -- see the \"criteria "
-            "scorable\" note under each card. A LOW badge on a low-completeness domain means "
-            "\"not enough data to flag,\" not \"verified low.\""
+            "See the \"criteria scorable\" note under each card. A LOW badge on a low-completeness "
+            "domain means \"not enough data to flag,\" not \"verified low.\""
         )
         # Cards are informational only (no per-card button) -- a single
         # shared button below covers all 7 domains' details at once,
@@ -430,12 +424,7 @@ def render(enriched_df, timeseries_df, pid):
     # ------------------------------------------------------------
     st.markdown('<div class="optoc-section-title">Current Vitals & Laboratory Results</div>',
                 unsafe_allow_html=True)
-    st.caption(
-        "Cards outlined in red are outside normal range for that value. Creatinine, Lactate, and "
-        "MAP also show a trend arrow (change from first to most recent reading on file) since "
-        "these most often drive pharmacist interventions in critically ill patients. Urine output "
-        "trending isn't shown -- not present in this dataset."
-    )
+    st.caption("Cards outlined in red are outside normal range for that value.")
 
     def _trend_delta(ts_col):
         """(delta, worse_if_increases) from first->last time-series

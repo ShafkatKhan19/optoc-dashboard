@@ -339,13 +339,13 @@ def render(enriched_df):
         <div style="display:flex; gap:22px; flex-wrap:wrap; align-items:center; margin:6px 0 4px 0;">
             <div><span style="display:inline-block; width:12px; height:12px; background-color:{ID_TAG_COLORS['AKI']};
                  margin-right:6px; vertical-align:middle;"></span>
-                 <span style="font-size:12.5px;">Nephro-Gold: Patient has Prior AKI</span></div>
+                 <span style="font-size:12.5px;">Patient has Prior AKI</span></div>
             <div><span style="display:inline-block; width:12px; height:12px; background-color:{ID_TAG_COLORS['SEPSIS']};
                  margin-right:6px; vertical-align:middle;"></span>
-                 <span style="font-size:12.5px;">Sepsis Crimson: Patient has Prior Sepsis</span></div>
+                 <span style="font-size:12.5px;">Patient has Prior Sepsis</span></div>
             <div><span style="display:inline-block; width:12px; height:12px; background-color:{ID_TAG_COLORS['BOTH']};
                  margin-right:6px; vertical-align:middle;"></span>
-                 <span style="font-size:12.5px;">Infection-Ischemic Indigo: Patient has both Prior AKI and Sepsis</span></div>
+                 <span style="font-size:12.5px;">Patient has both Prior AKI and Sepsis</span></div>
         </div>
         """,
         unsafe_allow_html=True,
