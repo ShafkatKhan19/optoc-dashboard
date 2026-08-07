@@ -98,19 +98,40 @@ st.session_state["selected_patient"] = picked
 st.session_state["_last_synced_patient"] = picked
 
 # Manual entry, for typing a Patient ID directly instead of scrolling the
-# dropdown -- normalizes "107", "p-0107", "P0107" etc. to match "P-0107".
-manual_id = st.sidebar.text_input("Or type Patient ID directly", placeholder="e.g. P-0107")
+# dropdown. Matches on the patient's actual NUMBER, not a text fragment --
+# "0107", "P-0107", and "107" (no leading zero) all correctly find
+# "P-0107" because 107 == 107 as numbers, but "7" does NOT match "P-0107"
+# just because "0107" happens to end in "7". Comparing as integers (not
+# substring/suffix text matching) is what keeps that distinction correct.
+manual_id = st.sidebar.text_input("Or type Patient ID directly", placeholder="e.g. P-0107 or just 107")
 if manual_id.strip():
-    digits = "".join(ch for ch in manual_id if ch.isalnum())
-    normalized = digits.upper()
-    match = next(
-        (p for p in patient_ids if "".join(ch for ch in p if ch.isalnum()).upper() == normalized),
-        None,
-    )
-    if match:
-        if match != st.session_state["selected_patient"]:
-            st.session_state["selected_patient"] = match
+    typed_digits = "".join(ch for ch in manual_id if ch.isdigit())
+    typed_alnum = "".join(ch for ch in manual_id if ch.isalnum()).upper()
+
+    exact = [p for p in patient_ids if "".join(ch for ch in p if ch.isalnum()).upper() == typed_alnum]
+
+    numeric_matches = []
+    if not exact and typed_digits:
+        typed_num = int(typed_digits)
+        for p in patient_ids:
+            pid_digits = "".join(ch for ch in p if ch.isdigit())
+            if pid_digits and int(pid_digits) == typed_num:
+                numeric_matches.append(p)
+
+    if len(exact) == 1:
+        if exact[0] != st.session_state["selected_patient"]:
+            st.session_state["selected_patient"] = exact[0]
             st.rerun()
+    elif len(numeric_matches) == 1:
+        if numeric_matches[0] != st.session_state["selected_patient"]:
+            st.session_state["selected_patient"] = numeric_matches[0]
+            st.rerun()
+    elif numeric_matches:
+        st.sidebar.caption("Multiple matches -- did you mean:")
+        for candidate in numeric_matches[:6]:
+            if st.sidebar.button(candidate, key=f"manual_match_{candidate}", use_container_width=True):
+                st.session_state["selected_patient"] = candidate
+                st.rerun()
     else:
         st.sidebar.caption(f'No patient found matching "{manual_id}".')
 

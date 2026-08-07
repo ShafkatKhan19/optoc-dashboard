@@ -13,6 +13,7 @@ pure duplication of the same charts.
 
 import pandas as pd
 import streamlit as st
+import streamlit.components.v1 as components
 import plotly.graph_objects as go
 
 from core.theme import page_header, risk_badge_html, RISK_COLORS
@@ -148,28 +149,6 @@ def render(enriched_df, timeseries_df, pid):
         )
 
     # ------------------------------------------------------------
-    # Previous/Next patient, so working through the census doesn't
-    # require re-opening the sidebar dropdown for every patient.
-    # ------------------------------------------------------------
-    all_ids = enriched_df["patient_id"].tolist()
-    current_idx = all_ids.index(pid) if pid in all_ids else 0
-    nav_prev, nav_pos, nav_next = st.columns([1, 2, 1])
-    with nav_prev:
-        if st.button("Previous Patient", use_container_width=True, disabled=current_idx <= 0):
-            st.session_state["selected_patient"] = all_ids[current_idx - 1]
-            st.rerun()
-    with nav_pos:
-        st.markdown(
-            f"<div style='text-align:center; padding-top:8px; color:#64748B; font-size:13px;'>"
-            f"Patient {current_idx + 1} of {len(all_ids)}</div>",
-            unsafe_allow_html=True,
-        )
-    with nav_next:
-        if st.button("Next Patient", use_container_width=True, disabled=current_idx >= len(all_ids) - 1):
-            st.session_state["selected_patient"] = all_ids[current_idx + 1]
-            st.rerun()
-
-    # ------------------------------------------------------------
     # Rounds Mode: hides secondary sections (7-Domain panel, Comorbidities,
     # Vital Details charts, Print Summary) so everything needed at the
     # bedside -- clinical summary, priority actions, compact outcome
@@ -212,9 +191,10 @@ def render(enriched_df, timeseries_df, pid):
         archived_note = " &nbsp;|&nbsp; <b style=\"color:#F59E0B;\">ARCHIVED</b>" if is_archived else ""
         st.markdown(
             f"""
-            <div style="background-color:#0F172A; color:white; padding:14px 20px;
-                         border-radius:10px; margin-bottom:0;">
-                <b>Patient ID:</b> {p['patient_id']} &nbsp;|&nbsp;
+            <div style="background-color:#0F172A; color:white; padding:16px 20px;
+                         border-radius:10px; margin-bottom:0; font-size:16px;">
+                <span style="font-size:22px; font-weight:800; color:#F59E0B;">Patient ID: {p['patient_id']}</span>
+                &nbsp;|&nbsp;
                 <b>Age:</b> {p['age']} &nbsp;|&nbsp; <b>Sex:</b> {p['sex']} &nbsp;|&nbsp;
                 <b>ICU Unit:</b> {p['icu_unit']} &nbsp;|&nbsp;
                 <b>Days in ICU:</b> {p['days_in_icu']} &nbsp;|&nbsp;
@@ -270,9 +250,17 @@ def render(enriched_df, timeseries_df, pid):
     st.markdown(f'<div class="optoc-card" style="font-size:15.5px;">{summary_text}</div>',
                 unsafe_allow_html=True)
     if interventions:
-        st.markdown("**Suggested Priority Actions:**")
-        for i, item in enumerate(interventions, 1):
-            st.markdown(f"{i}. {item}")
+        st.markdown("**Pharmacist Proposed Actions**")
+        for item in interventions:
+            st.markdown(
+                f"""
+                <div style="background-color:#F8FAFC; border:1px solid #E2E8F0; border-left:4px solid {RISK_COLORS['HIGH']['border']};
+                             border-radius:8px; padding:10px 14px; margin-bottom:8px; font-weight:700; color:#0F172A;">
+                    {item}
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
     else:
         st.caption("No specific priority actions flagged for this patient at this time.")
 
@@ -479,10 +467,21 @@ def render(enriched_df, timeseries_df, pid):
         ("Lactate", p.get("lactate_peak"), "mmol/L"), ("Creatinine", p.get("creatinine_current"), "mg/dL"),
         ("WBC", p.get("wbc_first"), "K/uL"), ("Fibrinogen", p.get("fibrinogen_first"), "mg/dL"),
     ]
+    # MAP, HR, RR, SpO2 shown as whole numbers with no unit label (per
+    # pharmacist feedback -- these are read at a glance, units add
+    # clutter). Lactate/Creatinine/WBC/Fibrinogen keep units + 1 decimal.
+    NO_UNIT_ROUND = {"MAP", "HR", "RR", "SpO2"}
+
     vcols = st.columns(4)
     for i, (label, val, unit) in enumerate(vitals):
         is_missing = val is None or (isinstance(val, float) and pd.isna(val))
-        value_str = "N/A" if is_missing else f"{val:.1f} {unit}"
+        bare_label = label.replace(" (derived)", "")
+        if is_missing:
+            value_str = "N/A"
+        elif bare_label in NO_UNIT_ROUND:
+            value_str = f"{val:.0f}"
+        else:
+            value_str = f"{val:.1f} {unit}"
         rule = ABNORMAL_RULES.get(label.replace(" (derived)", ""))
         is_abnormal = bool(not is_missing and rule and rule(val))
         card_key = f"vital_card_{label.replace(' ', '_').replace('(', '').replace(')', '')}"
@@ -620,24 +619,120 @@ def render(enriched_df, timeseries_df, pid):
         st.markdown("---")
 
         # ------------------------------------------------------------
-        # Time-series trends -- hidden in Rounds Mode (the key lab trend
-        # arrows are already in Vitals & Labs above; these full charts
-        # are the deeper look, not needed mid-round)
+        # Vital Details -- hidden in Rounds Mode. Replaced the 6 line
+        # charts with a single High/Medium/Low reading-count bar per
+        # vital over the last 24h; the line charts weren't actionable
+        # for a pharmacist at a glance, this is.
         # ------------------------------------------------------------
         st.markdown('<div class="optoc-section-title">Vital Details</div>', unsafe_allow_html=True)
+        st.caption("Count of readings in each risk tier over the last 24 hours since admission.")
         if len(ts) == 0:
             st.info("No time-series data available for this patient.")
         else:
-            plot_vars = [("map", "MAP (mmHg)"), ("hr", "Heart Rate (bpm)"), ("rr", "Respiratory Rate"),
-                         ("spo2", "SpO2 (%)"), ("lactate", "Lactate (mmol/L)"), ("creatinine", "Creatinine (mg/dL)")]
-            tcols = st.columns(3)
-            for i, (col, label) in enumerate(plot_vars):
-                if col in ts.columns:
-                    fig = go.Figure(go.Scatter(x=ts["hours_since_admission"], y=ts[col], mode="lines+markers"))
-                    fig.update_layout(title=dict(text=label, x=0.5, xanchor="center"), height=220,
-                                        margin=dict(t=30, b=10, l=10, r=10),
-                                        xaxis_title="Hours since admission")
-                    tcols[i % 3].plotly_chart(fig, use_container_width=True)
+            def _tier_map(v):
+                if v < 55:
+                    return "HIGH"
+                if v < 65:
+                    return "MEDIUM"
+                return "LOW"
+
+            def _tier_hr(v):
+                if v < 50 or v > 120:
+                    return "HIGH"
+                if v < 60 or v > 100:
+                    return "MEDIUM"
+                return "LOW"
+
+            def _tier_rr(v):
+                if v < 8 or v > 30:
+                    return "HIGH"
+                if v < 12 or v > 20:
+                    return "MEDIUM"
+                return "LOW"
+
+            def _tier_spo2(v):
+                if v < 88:
+                    return "HIGH"
+                if v < 92:
+                    return "MEDIUM"
+                return "LOW"
+
+            def _tier_lactate(v):
+                if v >= 4:
+                    return "HIGH"
+                if v >= 2:
+                    return "MEDIUM"
+                return "LOW"
+
+            def _tier_creatinine(v):
+                if v >= 2.0:
+                    return "HIGH"
+                if v >= 1.3:
+                    return "MEDIUM"
+                return "LOW"
+
+            VITAL_TIER_FNS = {
+                "map": (_tier_map, "MAP"), "hr": (_tier_hr, "HR"), "rr": (_tier_rr, "RR"),
+                "spo2": (_tier_spo2, "SpO2"), "lactate": (_tier_lactate, "Lactate"),
+                "creatinine": (_tier_creatinine, "Creatinine"),
+            }
+
+            window = ts[ts["hours_since_admission"] <= 24]
+            counts = {}
+            for col, (fn, label) in VITAL_TIER_FNS.items():
+                if col not in window.columns:
+                    continue
+                readings = window[col].dropna()
+                if readings.empty:
+                    continue
+                tier_counts = {"HIGH": 0, "MEDIUM": 0, "LOW": 0}
+                for v in readings:
+                    tier_counts[fn(v)] += 1
+                counts[label] = tier_counts
+
+            if not counts:
+                st.info("No vital readings within 24 hours of admission on file for this patient.")
+            else:
+                vital_labels = list(counts.keys())
+                # Low -> Medium -> High stacking order means a heavily
+                # "High" vital visibly towers in red at the top of its
+                # bar -- the thing a pharmacist should spot first.
+                fig = go.Figure()
+                for tier in ["LOW", "MEDIUM", "HIGH"]:
+                    values = [counts[v][tier] for v in vital_labels]
+                    fig.add_trace(go.Bar(
+                        name=tier.title(),
+                        x=vital_labels,
+                        y=values,
+                        marker_color=RISK_COLORS[tier]["border"],
+                        marker_line=dict(color="#FFFFFF", width=1.5),
+                        text=[str(v) if v > 0 else "" for v in values],
+                        textposition="inside",
+                        textfont=dict(color="#FFFFFF", size=13, family="Arial, sans-serif"),
+                        hovertemplate="%{x}: %{y} " + tier.title() + " reading(s)<extra></extra>",
+                    ))
+                fig.update_layout(
+                    barmode="stack",
+                    height=340,
+                    margin=dict(t=10, b=10, l=10, r=10),
+                    paper_bgcolor="#FFFFFF",
+                    plot_bgcolor="#FFFFFF",
+                    font=dict(family="Arial, sans-serif", size=13, color="#0F172A"),
+                    bargap=0.35,
+                    xaxis=dict(title=None, tickfont=dict(size=14, color="#0F172A")),
+                    yaxis=dict(
+                        title="Number of Readings",
+                        gridcolor="#EEF1F6",
+                        zeroline=False,
+                        dtick=1,
+                    ),
+                    legend=dict(
+                        orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0,
+                        font=dict(size=13),
+                    ),
+                )
+                with st.container(border=True):
+                    st.plotly_chart(fig, use_container_width=True)
 
     st.markdown("---")
 
@@ -658,10 +753,8 @@ def render(enriched_df, timeseries_df, pid):
     st.markdown("---")
 
     # ------------------------------------------------------------
-    # Print / export summary -- a clean one-page view, using window.print()
-    # scoped via @media print CSS (see core/theme.py) to only this
-    # section. Hidden in Rounds Mode (an end-of-encounter action, not
-    # needed mid-round).
+    # Print / export summary. Hidden in Rounds Mode (an end-of-encounter
+    # action, not needed mid-round).
     # ------------------------------------------------------------
     st.markdown('<div class="optoc-section-title">Print Summary</div>', unsafe_allow_html=True)
     st.caption("Prints just the box below (composite score, top factors, active alerts) -- "
@@ -678,10 +771,13 @@ def render(enriched_df, timeseries_df, pid):
 
     note_html = note.replace("\n", "<br>") if note else "<em>No note entered.</em>"
 
-    st.markdown(
-        f"""
-        <div class="optoc-print-section" style="border:1px solid #E2E8F0; border-radius:10px;
-                     padding:18px 22px; background-color:#FFFFFF;">
+    # Same font stack Streamlit's own UI uses, so the on-screen card and
+    # the printed PDF both match the rest of the dashboard.
+    app_font = '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Source Sans Pro", sans-serif'
+
+    summary_html = f"""
+        <div style="border:1px solid #E2E8F0; border-radius:10px; padding:18px 22px;
+                     background-color:#FFFFFF; font-family:{app_font}; color:#0F172A;">
             <h3 style="margin-top:0;">OPTOC Patient Summary &mdash; {p['patient_id']}</h3>
             <p><b>Age:</b> {p['age']} &nbsp;|&nbsp; <b>Sex:</b> {p['sex']} &nbsp;|&nbsp;
                <b>ICU Unit:</b> {p['icu_unit']} &nbsp;|&nbsp; <b>Days in ICU:</b> {p['days_in_icu']}</p>
@@ -692,10 +788,34 @@ def render(enriched_df, timeseries_df, pid):
             <ul>{alerts_html}</ul>
             <p><b>Pharmacist Note:</b><br>{note_html}</p>
         </div>
-        <button onclick="window.print()" style="margin-top:10px; background-color:#0F172A; color:white;
-                border:none; border-radius:8px; padding:10px 18px; font-weight:700; cursor:pointer;">
+    """
+
+    # On-screen preview -- a normal Streamlit-rendered card.
+    st.markdown(summary_html, unsafe_allow_html=True)
+
+    # The button lives in its own self-contained HTML document (via
+    # components.html, which -- unlike st.markdown -- isn't sanitized,
+    # so onclick actually runs). It prints ONLY this iframe's own
+    # document (plain window.print(), not window.parent.print()), which
+    # contains nothing but this summary -- no sidebar, nav, or the rest
+    # of the app. That sidesteps the earlier approach (hiding everything
+    # else on the main page via CSS visibility:hidden), which left blank
+    # reserved space for every hidden element and produced a mostly-empty
+    # multi-page PDF instead of one clean page.
+    components.html(
+        f"""
+        <style>
+            body {{ margin: 0; font-family: {app_font}; }}
+        </style>
+        <div id="print-content" style="display:none;">
+            {summary_html}
+        </div>
+        <button onclick="var c=document.getElementById('print-content'); c.style.display='block'; window.print(); c.style.display='none';"
+                style="background-color:#0F172A; color:white; border:none; border-radius:8px;
+                       padding:10px 18px; font-weight:700; font-size:14px; cursor:pointer;
+                       font-family:{app_font};">
             Print This Summary
         </button>
         """,
-        unsafe_allow_html=True,
+        height=50,
     )

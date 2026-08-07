@@ -20,6 +20,27 @@ from core.scoring import DOMAIN_FUNCTIONS, DOMAIN_LABELS, DOMAIN_DATA_COMPLETENE
 
 OUTCOME_KEYS = ["aki", "sepsis", "mortality", "readmission"]
 
+# Raw feature columns (see models/required_feature_columns.txt) a
+# pharmacist can directly act on -- medication/regimen choices they
+# control. Everything else (labs, vitals, comorbidity burden, SOFA,
+# age, etc.) reflects disease severity or demographics and isn't
+# something a pharmacist can change directly, so it's "clinical context."
+ACTIONABLE_FEATURES = {
+    "nephrotoxin_count", "total_discharge_meds", "mrci_simplified",
+    "flag_tpn", "flag_hit_risk_proxy", "flag_qtc_prolonging_med_exposure",
+    "flag_anticholinergic_exposure", "flag_cefepime_exposure",
+    "flag_linezolid_exposure", "flag_steroid_induced_hyperglycemia",
+}
+
+
+def _split_by_actionability(df, n=5):
+    """Splits a SHAP/LIME results DataFrame (must have a "raw" column)
+    into (top-n actionable, top-n non-actionable), both already sorted
+    by whatever order they arrived in (importance, highest first)."""
+    actionable = df[df["raw"].isin(ACTIONABLE_FEATURES)].head(n)
+    non_actionable = df[~df["raw"].isin(ACTIONABLE_FEATURES)].head(n)
+    return actionable, non_actionable
+
 DOMAIN_INTRO = (
     "The 7-Domain Clinical Risk Assessment scores each ICU patient across seven distinct organ "
     "systems — Neurological &amp; Sedation, Pulmonary, Cardiovascular, Renal, GI/Metabolic, "
@@ -132,23 +153,43 @@ def render(enriched_df, feature_df, display_df, pid):
     # above for a clinician who just wants the answer.
     # ------------------------------------------------------------
     with st.expander("Advanced Explainability (SHAP / LIME)", expanded=False):
-        left, right = st.columns(2)
-        with left:
-            st.markdown("**Key Risk Factors (All Patients)**")
-            pop_df = shap_population_drivers(outcome, feature_df, top_n=10)
-            fig = go.Figure(go.Bar(x=pop_df["impact"], y=pop_df["feature"], orientation="h",
-                                     marker_color="#2563EB"))
-            fig.update_layout(height=340, margin=dict(l=10, r=10, t=10, b=10),
-                                xaxis_title="Mean |impact| across cohort")
+        pop_df = shap_population_drivers(outcome, feature_df, top_n=10)
+
+        def _factor_bar(df, x_col, colors):
+            if df.empty:
+                st.caption("None of the top factors fall in this category.")
+                return
+            fig = go.Figure(go.Bar(x=df[x_col], y=df["feature"], orientation="h", marker_color=colors))
+            fig.update_layout(height=260, margin=dict(l=10, r=10, t=10, b=10))
             st.plotly_chart(fig, use_container_width=True)
 
-        with right:
-            st.markdown("**Contributing Factors (This Patient)**")
-            colors = ["#C00000" if d == "Increases risk" else "#2563EB" for d in lime_df["direction"]]
-            fig = go.Figure(go.Bar(x=lime_df["weight"], y=lime_df["feature"], orientation="h",
-                                     marker_color=colors))
-            fig.update_layout(height=340, margin=dict(l=10, r=10, t=10, b=10))
-            st.plotly_chart(fig, use_container_width=True)
+        st.markdown("**Key Risk Factors (All Patients)**")
+        shap_actionable, shap_clinical = _split_by_actionability(pop_df, n=5)
+        shap_left, shap_right = st.columns(2)
+        with shap_left:
+            st.markdown("##### Pharmacist-Actionable Factors")
+            st.caption("Variables the pharmacist team can directly intervene on")
+            _factor_bar(shap_actionable, "impact", "#2ecc71")
+        with shap_right:
+            st.markdown("##### Clinical Context Factors")
+            st.caption("Disease severity and demographics -- inform risk but aren't directly modifiable")
+            _factor_bar(shap_clinical, "impact", "#78909C")
+
+        st.markdown("---")
+
+        st.markdown("**Contributing Factors (This Patient)**")
+        lime_actionable, lime_clinical = _split_by_actionability(lime_df, n=5)
+        lime_left, lime_right = st.columns(2)
+        with lime_left:
+            st.markdown("##### Pharmacist-Actionable Factors")
+            st.caption("What's driving this patient's risk that can be changed")
+            colors = ["#C00000" if d == "Increases risk" else "#2563EB" for d in lime_actionable["direction"]]
+            _factor_bar(lime_actionable, "weight", colors)
+        with lime_right:
+            st.markdown("##### Clinical Context Factors")
+            st.caption("Background clinical factors for this patient")
+            colors = ["#C00000" if d == "Increases risk" else "#2563EB" for d in lime_clinical["direction"]]
+            _factor_bar(lime_clinical, "weight", colors)
 
         st.markdown("---")
 

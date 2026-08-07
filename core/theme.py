@@ -178,22 +178,6 @@ def inject_global_css():
             background-color: #D97706 !important;
             border-color: #D97706 !important;
         }}
-        /* Print Summary: scope window.print() to just .optoc-print-section
-           instead of printing the whole app (sidebar, nav, every chart). */
-        @media print {{
-            body * {{
-                visibility: hidden;
-            }}
-            .optoc-print-section, .optoc-print-section * {{
-                visibility: visible;
-            }}
-            .optoc-print-section {{
-                position: absolute;
-                top: 0;
-                left: 0;
-                width: 100%;
-            }}
-        }}
         .optoc-header h1 {{
             margin: 0;
             font-size: 26px;

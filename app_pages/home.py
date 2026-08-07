@@ -6,7 +6,6 @@ alerts, risk KPIs, sortable/rankable patient table. Landing page.
 """
 
 import streamlit as st
-import plotly.graph_objects as go
 
 from core.theme import risk_badge_html, risk_cell_style, color_dot, RISK_COLORS
 from core.med_alerts import get_medication_alerts
@@ -27,66 +26,6 @@ MORE_DETAILS_TEXT = """
 **Sample data**
 - Electronic health record data for 10 hospitalized patients
 """
-
-
-TIERS = ["HIGH", "MEDIUM", "LOW"]
-
-# outer -> inner ring domain spans (fraction of the plot's square area each
-# ring occupies) -- gives the concentric "radial gauge" look
-_RING_SIZES = [1.0, 0.78, 0.56]
-
-
-def _radial_rings(df, risk_col, tier_col, title, subtitle):
-    total = len(df) or 1
-    counts = df[tier_col].value_counts()
-    pct = {t: counts.get(t, 0) / total * 100 for t in TIERS}
-    avg_risk = df[risk_col].mean() * 100
-
-    fig = go.Figure()
-    for size, tier in zip(_RING_SIZES, TIERS):
-        frac = max(pct[tier] / 100, 0.0015)
-        pad = (1 - size) / 2
-        fig.add_trace(go.Pie(
-            values=[frac, 1 - frac],
-            hole=0.72,
-            domain=dict(x=[pad, 1 - pad], y=[pad, 1 - pad]),
-            marker=dict(colors=[RISK_COLORS[tier]["border"], "#EDF1F7"]),
-            direction="clockwise",
-            rotation=90,
-            sort=False,
-            textinfo="none",
-            hovertext=[f"{tier.title()}: {pct[tier]:.0f}% ({int(counts.get(tier, 0))})", ""],
-            hoverinfo="text",
-            showlegend=False,
-        ))
-    fig.update_layout(
-        height=300,
-        margin=dict(t=10, b=10, l=10, r=10),
-        paper_bgcolor="#FFFFFF",
-        plot_bgcolor="#FFFFFF",
-        annotations=[dict(
-            text=f"<b style='font-size:26px;color:#0F172A;'>{avg_risk:.0f}%</b>"
-                 f"<br><span style='font-size:11px;color:#64748B;'>Avg Risk</span>",
-            x=0.5, y=0.5, showarrow=False,
-        )],
-    )
-
-    legend_rows = "".join(
-        f"""
-        <div style="display:flex; justify-content:space-between; align-items:center; padding:5px 2px;">
-            <div>{color_dot(RISK_COLORS[t]["border"])}<span style="font-weight:600; color:#0F172A;">{t.title()}</span></div>
-            <div style="font-weight:700; color:#0F172A;">{pct[t]:.0f}% ({int(counts.get(t, 0))})</div>
-        </div>
-        """
-        for t in TIERS
-    )
-    card_html = f"""
-    <div class="optoc-card" style="padding:16px 18px;">
-        <div style="font-weight:700; font-size:16px; color:#0F172A;">{title}</div>
-        <div style="font-size:12.5px; color:#64748B; margin-bottom:4px;">{subtitle}</div>
-    </div>
-    """
-    return fig, legend_rows, card_html
 
 
 def render(enriched_df):
@@ -359,21 +298,3 @@ def render(enriched_df):
     )
 
     st.caption("Click any row in the table above to open that patient's full profile in the Individual Patient tab.")
-
-    st.markdown("---")
-
-    # ------------------------------------------------------------
-    # Two radial-ring risk-distribution charts -- moved below Patient
-    # Ranking (population distribution is a supporting view, not the
-    # first thing a pharmacist needs).
-    # ------------------------------------------------------------
-    d1, d2 = st.columns(2)
-    for col, risk_col, tier_col, title, subtitle in [
-        (d1, "readmission_risk", "readmission_tier", "Readmission Risk", "Distribution by risk tier"),
-        (d2, "mortality_risk", "mortality_tier", "Mortality Risk", "Distribution by risk tier"),
-    ]:
-        with col:
-            fig, legend_rows, card_html = _radial_rings(enriched_df, risk_col, tier_col, title, subtitle)
-            st.markdown(card_html, unsafe_allow_html=True)
-            st.plotly_chart(fig, use_container_width=True)
-            st.markdown(legend_rows, unsafe_allow_html=True)

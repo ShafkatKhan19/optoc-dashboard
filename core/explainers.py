@@ -86,6 +86,7 @@ def shap_population_drivers(outcome, cohort_feature_df, top_n=10):
 
     return pd.DataFrame({
         "feature": [_clean_feature_name(feature_names[i]) for i in top_idx],
+        "raw": [feature_names[i].replace("num__", "").replace("cat__", "") for i in top_idx],
         "impact": mean_abs[top_idx],
     })
 
@@ -152,8 +153,20 @@ def lime_patient_factors(outcome, patient_feature_row, top_n=10):
     factors = explanation.as_list()
     df = pd.DataFrame(factors, columns=["condition", "weight"])
     df["feature"] = df["condition"].apply(_clean_condition_label)
+    df["raw"] = df["condition"].apply(_raw_key_from_condition)
     df["direction"] = np.where(df["weight"] > 0, "Increases risk", "Decreases risk")
-    return df[["feature", "weight", "direction"]]
+    return df[["feature", "raw", "weight", "direction"]]
+
+
+def _raw_key_from_condition(condition_str):
+    """Which raw feature column a LIME condition string (e.g.
+    'num__scr_delta > 0.24') refers to, or None if it doesn't match a
+    known column -- used to check actionability, separate from the
+    plain-language label."""
+    for raw in FEATURE_LABELS:
+        if raw in condition_str:
+            return raw
+    return None
 
 
 def _clean_condition_label(condition_str):
